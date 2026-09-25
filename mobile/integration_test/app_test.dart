@@ -11,6 +11,17 @@ void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
   const native = app.native;
 
+  // CI grants DND + "modify system settings" via adb in the background; wait for it
+  // so the SUCCESS paths are tested for real (falls back to graceful checks otherwise).
+  setUpAll(() async {
+    for (int i = 0; i < 30; i++) {
+      final dnd = await native.invokeMethod<bool>('hasDndAccess');
+      final ws = await native.invokeMethod<bool>('canWriteSettings');
+      if (dnd == true && ws == true) break;
+      await Future.delayed(const Duration(seconds: 1));
+    }
+  });
+
   group('Real Android native functions', () {
     testWidgets('list installed apps (with icons)', (t) async {
       final apps = await native.invokeListMethod<Map>('getApps');
@@ -89,10 +100,10 @@ void main() {
         await t.pump(const Duration(milliseconds: 600));
         expect(t.takeException(), isNull, reason: 'tab $tab threw');
       }
-      // real clean via the orb
+      // real clean via the orb -> user must SEE a result
       await t.tap(find.byKey(const Key('boostOrb')));
       await t.pump(const Duration(seconds: 2));
-      expect(find.textContaining('Cleaned'), findsOneWidget);
+      expect(find.textContaining('Boost done!'), findsOneWidget);
     });
 
     testWidgets('real ping from device', (t) async {

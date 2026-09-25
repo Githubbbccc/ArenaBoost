@@ -219,10 +219,28 @@ class _HomeState extends State<Home> with WidgetsBindingObserver, SingleTickerPr
   // ---------------- quick boost (no launch)
   Future<Map?> quickClean() async {
     if (!isAndroid) return null;
-    final r = await native.invokeMapMethod('boost', {'keep': <String>[]});
-    log('🧹 Cleaned ${r?['killed']} apps, freed ~${mb(r?['freed'] ?? 0)}');
-    _refreshStats();
-    return r;
+    try {
+      final r = await native.invokeMapMethod('boost', {'keep': <String>[]});
+      final msg = 'Cleaned ${r?['killed']} apps, freed ~${mb(r?['freed'] ?? 0)}';
+      log('🧹 $msg');
+      _toast('⚡ Boost done! $msg');
+      _refreshStats();
+      return r;
+    } catch (e) {
+      log('❌ Clean failed: $e');
+      _toast('Clean failed');
+      return null;
+    }
+  }
+
+  /// Visible confirmation (the activity log may be below the fold on small phones).
+  void _toast(String m) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(
+          content: Text(m), behavior: SnackBarBehavior.floating, backgroundColor: surface2,
+          duration: const Duration(seconds: 3)));
   }
 
   // ---------------- BOOST & LAUNCH
@@ -515,12 +533,7 @@ class _HomeState extends State<Home> with WidgetsBindingObserver, SingleTickerPr
         subtitle: Text('Screen ${dev['refresh'] ?? ''} Hz · ${dev['network'] ?? ''}', style: const TextStyle(color: muted)),
       )),
       const SizedBox(height: 8),
-      _gradientButton(Icons.cleaning_services, 'Clean background apps now', () async {
-        final r = await quickClean();
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Freed ~${mb(r?['freed'] ?? 0)}')));
-        }
-      }),
+      _gradientButton(Icons.cleaning_services, 'Clean background apps now', quickClean),
     ]);
   }
 

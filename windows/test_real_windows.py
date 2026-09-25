@@ -59,14 +59,16 @@ def test_real_standby_purge():
 
 
 def test_real_timer_resolution():
-    ab.WinTweaks.set_timer(True)
-    ab.WinTweaks.set_timer(False)
+    assert ab.WinTweaks.set_timer(True) is True
+    assert ab.WinTweaks.set_timer(False) is True
 
 
 def test_selftest_command_passes():
     out = subprocess.run([sys.executable, ab.__file__, "--selftest"], capture_output=True, text=True, timeout=120)
-    print(out.stdout)
-    assert out.returncode == 0, out.stdout
+    print(out.stdout, out.stderr)
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert "[PASS] Standby RAM purge" in out.stdout
+    assert "[PASS] Power plan switch + restore" in out.stdout
 
 
 def test_gui_opens_and_every_page_works():
@@ -121,8 +123,7 @@ def test_real_boost_and_launch_end_to_end(tmp_path):
         assert app.engine.active
         assert ab.WinTweaks.get_power_plan() != old_plan, "power plan not switched"
         assert psutil.Process(hog_p.pid).status() == psutil.STATUS_STOPPED, "hog not suspended"
-        gp = ab.find_game_procs(game)[0]
-        assert gp.nice() == psutil.ABOVE_NORMAL_PRIORITY_CLASS, "priority not raised"
+        _wait(lambda: all(p.nice() == psutil.ABOVE_NORMAL_PRIORITY_CLASS for p in ab.find_game_procs(game)), 20)
         th.join(60)
         # after game closed: everything restored
         assert res.get("r") == "ok"

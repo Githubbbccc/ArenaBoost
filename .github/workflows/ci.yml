@@ -71,7 +71,7 @@ jobs:
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim
           working-directory: mobile
-          script: flutter test integration_test -d emulator-5554 --reporter expanded
+          script: bash ../ci/android_device_test.sh
 
   ios:
     name: iOS – compile check (no signing)

@@ -12,7 +12,7 @@ Design rules (from our research):
   * Honest network tools: ping test + pausing bandwidth hogs.
 Run as Administrator for full features (app asks automatically).
 """
-import ctypes, json, os, re, socket, subprocess, sys, threading, time, glob, logging
+import ctypes, json, os, re, socket, subprocess, sys, threading, time, glob, logging, queue
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
@@ -293,22 +293,45 @@ class WinTweaks:
     # ---- standby list purge (same method as ISLC / RAMMap)
     @staticmethod
     def _enable_privilege(name):
-        advapi = ctypes.windll.advapi32
-        k32 = ctypes.windll.kernel32
+        """Enable a privilege on our process token. Uses correct 64-bit handle types
+        (a plain int handle gets truncated on x64 -> STATUS_PRIVILEGE_NOT_HELD)."""
+        from ctypes import wintypes
+        advapi = ctypes.WinDLL("advapi32", use_last_error=True)
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
 
         class LUID(ctypes.Structure):
-            _fields_ = [("Low", ctypes.c_ulong), ("High", ctypes.c_long)]
+            _fields_ = [("LowPart", wintypes.DWORD), ("HighPart", wintypes.LONG)]
 
-        class TP(ctypes.Structure):
-            _fields_ = [("Count", ctypes.c_ulong), ("Luid", LUID), ("Attr", ctypes.c_ulong)]
+        class LUID_AND_ATTRIBUTES(ctypes.Structure):
+            _fields_ = [("Luid", LUID), ("Attributes", wintypes.DWORD)]
 
-        tok = ctypes.c_void_p()
-        advapi.OpenProcessToken(k32.GetCurrentProcess(), 0x0020 | 0x0008, ctypes.byref(tok))
-        luid = LUID()
-        advapi.LookupPrivilegeValueW(None, name, ctypes.byref(luid))
-        tp = TP(1, luid, 0x2)
-        advapi.AdjustTokenPrivileges(tok, False, ctypes.byref(tp), 0, None, None)
-        k32.CloseHandle(tok)
+        class TOKEN_PRIVILEGES(ctypes.Structure):
+            _fields_ = [("PrivilegeCount", wintypes.DWORD), ("Privileges", LUID_AND_ATTRIBUTES * 1)]
+
+        k32.GetCurrentProcess.restype = wintypes.HANDLE
+        k32.CloseHandle.argtypes = [wintypes.HANDLE]
+        advapi.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
+        advapi.OpenProcessToken.restype = wintypes.BOOL
+        advapi.LookupPrivilegeValueW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR, ctypes.POINTER(LUID)]
+        advapi.LookupPrivilegeValueW.restype = wintypes.BOOL
+        advapi.AdjustTokenPrivileges.argtypes = [wintypes.HANDLE, wintypes.BOOL, ctypes.POINTER(TOKEN_PRIVILEGES),
+                                                 wintypes.DWORD, ctypes.c_void_p, ctypes.c_void_p]
+        advapi.AdjustTokenPrivileges.restype = wintypes.BOOL
+
+        tok = wintypes.HANDLE()
+        if not advapi.OpenProcessToken(k32.GetCurrentProcess(), 0x0020 | 0x0008, ctypes.byref(tok)):
+            raise OSError(ctypes.get_last_error(), "OpenProcessToken failed")
+        try:
+            luid = LUID()
+            if not advapi.LookupPrivilegeValueW(None, name, ctypes.byref(luid)):
+                raise OSError(ctypes.get_last_error(), "LookupPrivilegeValue failed")
+            tp = TOKEN_PRIVILEGES(1, (LUID_AND_ATTRIBUTES * 1)(LUID_AND_ATTRIBUTES(luid, 0x2)))
+            advapi.AdjustTokenPrivileges(tok, False, ctypes.byref(tp), 0, None, None)
+            err = ctypes.get_last_error()
+            if err:  # 1300 = ERROR_NOT_ALL_ASSIGNED
+                raise OSError(err, f"privilege {name} not granted")
+        finally:
+            k32.CloseHandle(tok)
 
     @staticmethod
     def purge_standby():
@@ -318,7 +341,10 @@ class WinTweaks:
             WinTweaks._enable_privilege("SeProfileSingleProcessPrivilege")
             before = psutil.virtual_memory().available
             cmd = ctypes.c_int(4)  # MemoryPurgeStandbyList
-            st = ctypes.windll.ntdll.NtSetSystemInformation(80, ctypes.byref(cmd), ctypes.sizeof(cmd))
+            nt = ctypes.WinDLL("ntdll")
+            nt.NtSetSystemInformation.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_ulong]
+            nt.NtSetSystemInformation.restype = ctypes.c_long
+            st = nt.NtSetSystemInformation(80, ctypes.byref(cmd), ctypes.sizeof(cmd))
             after = psutil.virtual_memory().available
             if st != 0:
                 return f"Failed (NTSTATUS {st & 0xffffffff:#x})"
@@ -332,7 +358,10 @@ class WinTweaks:
         if not IS_WIN:
             return
         cur = ctypes.c_ulong()
-        ctypes.windll.ntdll.NtSetTimerResolution(5000, bool(enable), ctypes.byref(cur))
+        nt = ctypes.WinDLL("ntdll")
+        nt.NtSetTimerResolution.argtypes = [ctypes.c_ulong, ctypes.c_ubyte, ctypes.POINTER(ctypes.c_ulong)]
+        nt.NtSetTimerResolution.restype = ctypes.c_long
+        return nt.NtSetTimerResolution(5000, 1 if enable else 0, ctypes.byref(cur)) == 0
 
     # ---- game bar / overlay checks
     @staticmethod
@@ -576,6 +605,7 @@ class App(tk.Tk):
         self.minsize(980, 640)
         self.configure(bg=BG)
         self.cfg = load_cfg()
+        self._uiq = queue.Queue()  # background threads NEVER touch Tk directly
         self.engine = BoostEngine(self.cfg, self.log)
         self._busy = False
         self._style()
@@ -592,7 +622,27 @@ class App(tk.Tk):
         self._tick = 0
         self.after(800, self.update_monitor)
         self.after(60, self._animate)
+        self.after(40, self._drain_ui)
         self.protocol("WM_DELETE_WINDOW", self.on_close)
+
+    def ui(self, fn):
+        """Thread-safe: schedule fn to run on the Tk main thread."""
+        self._uiq.put(fn)
+
+    def _drain_ui(self):
+        try:
+            while True:
+                fn = self._uiq.get_nowait()
+                try:
+                    fn()
+                except tk.TclError:
+                    pass
+        except queue.Empty:
+            pass
+        try:
+            self.after(40, self._drain_ui)
+        except tk.TclError:
+            pass
 
     # ---------------------------------------------------------------- style
     def _style(self):
@@ -683,15 +733,9 @@ class App(tk.Tk):
         log.info(msg)
 
         def _w():
-            try:
-                self.logbox.insert("end", time.strftime("%H:%M:%S  ") + msg + "\n")
-                self.logbox.see("end")
-            except tk.TclError:
-                pass
-        try:
-            self.after(0, _w)
-        except Exception:
-            pass
+            self.logbox.insert("end", time.strftime("%H:%M:%S  ") + msg + "\n")
+            self.logbox.see("end")
+        self.ui(_w)
 
     def set_status(self, text, color):
         def _u():
@@ -700,10 +744,7 @@ class App(tk.Tk):
             self.boost_btn.set_active(active, "BOOSTED" if active else ("…" if "Boost" in text else "BOOST"))
             self.hero_state.config(text="Your PC is boosted 🚀" if active else "Ready to boost",
                                    fg=GOOD if active else FG)
-        try:
-            self.after(0, _u)
-        except Exception:
-            pass
+        self.ui(_u)
 
     def _animate(self):
         if self.engine.active:
@@ -1085,10 +1126,10 @@ class App(tk.Tk):
                     vals = (f"{avg:.0f}", f"{jit:.1f}", f"{loss:.0f}", q)
                 else:
                     vals = ("timeout", "-", "100", "Unreachable")
-                self.after(0, lambda reg=region, v=vals: self.ntree.insert("", "end", text="  " + reg, values=v))
+                self.ui(lambda reg=region, v=vals: self.ntree.insert("", "end", text="  " + reg, values=v))
             self.log("📡 Ping test done. High jitter = Wi-Fi or someone downloading.")
             if done:
-                done()
+                self.ui(done)
         threading.Thread(target=work, daemon=True).start()
 
     def find_hogs(self):
@@ -1159,8 +1200,16 @@ class App(tk.Tk):
 def selftest():
     """Runs the REAL functions on this PC and prints PASS/FAIL. Use: ArenaBoost.exe --selftest"""
     results = []
-    if sys.stdout is None:  # windowed .exe has no console -> write report to file
-        sys.stdout = open(os.path.join(APP_DIR, "selftest.txt"), "w", encoding="utf-8")
+    report = open(os.path.join(APP_DIR, "selftest.txt"), "w", encoding="utf-8")
+
+    def out(line):
+        report.write(line + "\n"); report.flush()
+        if sys.stdout is not None:  # windowed .exe has no console
+            try:
+                sys.stdout.write(line.encode(sys.stdout.encoding or "utf-8", "replace").decode(sys.stdout.encoding or "utf-8") + "\n")
+                sys.stdout.flush()
+            except Exception:
+                pass
 
     def check(name, fn):
         try:
@@ -1168,10 +1217,10 @@ def selftest():
         except Exception as e:
             ok, info = False, f"{type(e).__name__}: {e}"
         results.append((name, ok, info))
-        print(f"[{'PASS' if ok else 'FAIL'}] {name} - {info}", flush=True)
+        out(f"[{'PASS' if ok else 'FAIL'}] {name} - {info}")
 
     admin = is_admin()
-    print(f"[INFO] Administrator rights - {'yes' if admin else 'no (service pause & RAM purge limited)'}", flush=True)
+    out(f"[INFO] Administrator rights - {'yes' if admin else 'no (service pause & RAM purge limited)'}")
     check("Game scan", lambda: (True, f"{len(scan_all())} games found"))
     if IS_WIN:
         def power():
@@ -1180,15 +1229,16 @@ def selftest():
             now = WinTweaks.get_power_plan()
             WinTweaks.set_power_plan(old)
             back = WinTweaks.get_power_plan()
-            return (now and now.lower() == new.lower() and back == old, f"{old[:8]} → {now[:8]} → {back[:8]}")
+            return (bool(now) and now.lower() == new.lower() and back == old, f"{old[:8]} -> {now[:8]} -> {back[:8]}")
         check("Power plan switch + restore", power)
-        check("Timer resolution 0.5ms", lambda: (WinTweaks.set_timer(True) or WinTweaks.set_timer(False) or True, "set & released"))
+        check("Timer resolution 0.5ms", lambda: ((WinTweaks.set_timer(True), WinTweaks.set_timer(False))[0], "set & released"))
         if admin:
-            check("Standby RAM purge", lambda: (WinTweaks.purge_standby().startswith("OK"), WinTweaks.purge_standby()))
+            check("Standby RAM purge", lambda: ((r := WinTweaks.purge_standby()).startswith("OK"), r))
     check("Ping (network)", lambda: ((r := tcp_ping("dynamodb.me-south-1.amazonaws.com", count=3)) is not None,
                                      f"{r[0]:.0f} ms" if r else "unreachable"))
     fails = [r for r in results if not r[1]]
-    print(f"\n{len(results) - len(fails)}/{len(results)} checks passed", flush=True)
+    out(f"\n{len(results) - len(fails)}/{len(results)} checks passed")
+    report.close()
     return 1 if fails else 0
 
 

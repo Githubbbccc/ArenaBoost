@@ -114,7 +114,8 @@ void main() {
       await t.tap(find.byKey(const Key('boostOrb')));
       await t.pump();
       expect(names, contains('boost'));
-      expect(find.textContaining('Cleaned 12 apps'), findsOneWidget);
+      expect(find.textContaining('Cleaned 12 apps'), findsNWidgets(2)); // log + visible toast
+      expect(find.textContaining('Boost done!'), findsOneWidget);
     });
 
     testWidgets('quick-launch tile boosts and launches', (t) async {
@@ -257,7 +258,7 @@ void main() {
       await t.tap(find.text('Clean background apps now'));
       await t.pump();
       expect(names, contains('boost'));
-      expect(find.text('Freed ~450 MB'), findsOneWidget);
+      expect(find.textContaining('Boost done! Cleaned 12 apps, freed ~450 MB'), findsOneWidget);
     });
   });
 

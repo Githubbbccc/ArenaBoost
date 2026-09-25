@@ -32,11 +32,11 @@ Every push runs these on GitHub:
 
 | Test | Where | What is real |
 |---|---|---|
-| Windows unit tests (20) | Windows | game scanning, pause/resume of real processes, crash recovery |
-| **Windows real system tests** | Windows, **as Administrator** | real power plan switch and restore, real service pause and restart, real standby RAM purge, real timer, **the real app window with every page**, a **full Boost & Launch of a real process** checked while it runs and after it closes |
+| Windows unit tests (21) | Windows | game scanning, pause/resume of real processes, crash recovery |
+| **Windows real system tests (10)** | Windows, **as Administrator** | real power plan switch and restore, real ping to every region, repeated pauses fully resumed, real service pause and restart, real standby RAM purge, real timer, **the real app window with every page**, a **full Boost & Launch of a real process** checked while it runs and after it closes |
 | **EXE self-test** | Windows | the built `ArenaBoost.exe --selftest` |
 | Mobile widget tests (20) | Linux | every screen, the boost flow, orientation, warnings, error handling |
-| **Android real-device test** | **Android 14 emulator** | real app list, RAM, battery, temperature, cleaning, Do Not Disturb, rotation lock, app launch, and the real UI |
+| **Android real-device test (11)** | **Android 14 emulator** | real app list, RAM, battery, temperature, cleaning, Do Not Disturb, rotation lock, app launch, and the real UI |
 | iOS compile check | macOS | the build compiles |
 
 Run locally:

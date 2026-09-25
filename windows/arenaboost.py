@@ -59,7 +59,6 @@ DEFAULT_HOGS = [
 DEFAULT_SERVICES = ["wuauserv", "DoSvc", "WSearch", "SysMain", "BITS"]
 
 PING_TARGETS = {
-    "Bahrain (ME)": "dynamodb.me-south-1.amazonaws.com",
     "UAE / Dubai": "dynamodb.me-central-1.amazonaws.com",
     "Mumbai": "dynamodb.ap-south-1.amazonaws.com",
     "Singapore": "dynamodb.ap-southeast-1.amazonaws.com",
@@ -796,7 +795,7 @@ class App(tk.Tk):
         self.tip_lbl.pack(anchor="w", padx=16, pady=12)
         self._tips = ["💡 Ethernet beats Wi-Fi for ping and stability.", "💡 Close the browser — it's the #1 RAM hog.",
                       "💡 Keep your game on an SSD to stop open-world stutter.",
-                      "💡 Pick the closest server region (Bahrain / UAE / Mumbai for Pakistan).",
+                      "💡 Pick the closest server region (UAE / Mumbai for Pakistan).",
                       "💡 Over 90°C? Clean the dust — no software fixes throttling."]
         self._tip_i = 0
         self._rotate_tip()

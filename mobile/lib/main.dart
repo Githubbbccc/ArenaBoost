@@ -79,7 +79,6 @@ const iosGames = {
 };
 
 const pingTargets = {
-  'Bahrain (ME)': 'dynamodb.me-south-1.amazonaws.com',
   'UAE / Dubai': 'dynamodb.me-central-1.amazonaws.com',
   'Mumbai': 'dynamodb.ap-south-1.amazonaws.com',
   'Singapore': 'dynamodb.ap-southeast-1.amazonaws.com',
@@ -863,7 +862,7 @@ class _NetworkPageState extends State<NetworkPage> {
           child: Text(
               'Honest note: no app can shorten the distance to the game server. What really lowers ping: '
               '5 GHz Wi-Fi close to the router, pausing downloads/streams on other devices, choosing the nearest '
-              'server (Bahrain/UAE/Mumbai for Pakistan), and trying a different network if your ISP route is bad.',
+              'server (UAE/Mumbai for Pakistan), and trying a different network if your ISP route is bad.',
               style: TextStyle(color: muted, fontSize: 13)),
         ),
       ),

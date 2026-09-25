@@ -25,6 +25,21 @@ def spawn_sleeper(folder=None, name="abtestproc"):
     return subprocess.Popen([exe, "-c", "import time; time.sleep(60)"]), exe
 
 
+def cleanup(p, exe):
+    try:
+        psutil.Process(p.pid).resume()
+    except Exception:
+        pass
+    p.kill(); p.wait(timeout=10)
+    for _ in range(20):  # Windows keeps the exe locked briefly after exit
+        try:
+            os.remove(exe); return
+        except FileNotFoundError:
+            return
+        except PermissionError:
+            time.sleep(0.25)
+
+
 # ------------------------------------------------------------ config
 def test_config_defaults_and_roundtrip():
     cfg = ab.load_cfg()
@@ -90,7 +105,7 @@ def test_suspend_and_resume_real_process():
         time.sleep(0.2)
         assert psutil.Process(p.pid).status() != psutil.STATUS_STOPPED
     finally:
-        p.kill(); os.remove(exe)
+        cleanup(p, exe)
 
 
 def test_suspend_skips_game_and_protected():
@@ -100,7 +115,7 @@ def test_suspend_skips_game_and_protected():
         assert ab.WinTweaks.suspend_hogs([os.path.basename(exe)], {p.pid}) == []
         assert ab.WinTweaks.suspend_hogs(["csrss.exe", "explorer.exe", "systemd"] if os.name != "nt" else ["csrss.exe"], set()) == [] or os.name != "nt"
     finally:
-        p.kill(); os.remove(exe)
+        cleanup(p, exe)
 
 
 def test_find_game_by_folder_and_by_name(tmp_path):
@@ -190,7 +205,7 @@ def test_crash_recovery_real_suspended_process():
         time.sleep(0.2)
         assert psutil.Process(p.pid).status() != psutil.STATUS_STOPPED
     finally:
-        p.kill(); os.remove(exe)
+        cleanup(p, exe)
 
 
 def test_power_plan_parsing(monkeypatch):

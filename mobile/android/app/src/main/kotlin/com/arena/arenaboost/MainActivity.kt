@@ -20,9 +20,9 @@ import android.net.NetworkCapabilities
 import android.net.Uri
 import android.os.BatteryManager
 import android.os.Build
-import android.os.Gravity
 import android.os.PowerManager
 import android.provider.Settings
+import android.view.Gravity
 import android.view.WindowManager
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -37,7 +37,8 @@ class MainActivity : FlutterActivity() {
     private var savedDndFilter: Int? = null
     private var savedAutoRotate: Int? = null
     private var savedUserRotation: Int? = null
-    private val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+    // resolved lazily: getSystemService() must not run during the Activity constructor
+    private val wm: WindowManager get() = getSystemService(Context.WINDOW_SERVICE) as WindowManager
     private var gameBarView: LinearLayout? = null
     private var gameBarText: TextView? = null
     private var lastCpuIdle = 0L
@@ -251,7 +252,7 @@ class MainActivity : FlutterActivity() {
             setOnClickListener { // tap the bar -> back to ArenaBoost (auto-restores on return)
                 val i = packageManager.getLaunchIntentForPackage(packageName)
                 if (i != null) {
-                    i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_BRING_TO_FRONT)
+                    i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
                     startActivity(i)
                 }
             }

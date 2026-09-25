@@ -100,6 +100,7 @@ def test_suspend_and_resume_real_process():
         time.sleep(0.5)
         pids = ab.WinTweaks.suspend_hogs([os.path.basename(exe)], set())
         assert p.pid in pids
+        time.sleep(0.3)
         assert psutil.Process(p.pid).status() == psutil.STATUS_STOPPED or os.name == "nt"
         ab.WinTweaks.resume_pids(pids)
         time.sleep(0.2)

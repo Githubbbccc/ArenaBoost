@@ -40,9 +40,36 @@ jobs:
       - uses: subosito/flutter-action@v2
         with: { channel: stable, cache: true }
       - run: flutter pub get
-      - run: flutter analyze
-      - run: flutter test
-      - run: flutter build apk --release
+      - name: Run flutter analyze (surface errors as annotations)
+        run: |
+          set +e
+          flutter analyze > /tmp/analyze.log 2>&1
+          RC=$?
+          if [ $RC -ne 0 ]; then
+            grep -E "error •|warning •|Analyzing mobile" /tmp/analyze.log | head -40 | while IFS= read -r l; do echo "::error::$l"; done
+            exit $RC
+          fi
+      - name: Run flutter test (surface errors as annotations)
+        run: |
+          set +e
+          flutter test > /tmp/wtest.log 2>&1
+          RC=$?
+          if [ $RC -ne 0 ]; then
+            grep -E "\[E\]|FAILED|Expected|Actual|Exception" /tmp/wtest.log | head -40 | while IFS= read -r l; do echo "::error::$l"; done
+            tail -n 30 /tmp/wtest.log | while IFS= read -r l; do echo "::error::$l"; done
+            exit $RC
+          fi
+      - name: Build release APK (surface errors as annotations)
+        run: |
+          set +e
+          flutter build apk --release > /tmp/apk_build.log 2>&1
+          RC=$?
+          if [ $RC -ne 0 ]; then
+            ERR=$(grep -E "^e: |error:|FAILURE:|What went wrong|Execution failed|Caused by" /tmp/apk_build.log | head -40)
+            [ -z "$ERR" ] && ERR=$(tail -n 40 /tmp/apk_build.log)
+            echo "$ERR" | while IFS= read -r l; do echo "::error::$l"; done
+            exit $RC
+          fi
       - uses: actions/upload-artifact@v4
         with: { name: ArenaBoost-Android, path: mobile/build/app/outputs/flutter-apk/app-release.apk }
 

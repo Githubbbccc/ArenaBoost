@@ -1,5 +1,4 @@
-// Copy to: android/app/src/main/kotlin/com/arena/arenaboost/MainActivity.kt
-// (first line package must match your applicationId)
+// ArenaBoost - Created by Ghost - Copyright (c) 2026 Ghost - MIT License
 package com.arena.arenaboost
 
 import android.app.ActivityManager
@@ -30,6 +29,8 @@ import java.io.File
 class MainActivity : FlutterActivity() {
     private val channel = "arenaboost/native"
     private var savedDndFilter: Int? = null
+    private var savedAutoRotate: Int? = null
+    private var savedUserRotation: Int? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -49,6 +50,12 @@ class MainActivity : FlutterActivity() {
                         startActivity(Intent(Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS)); result.success(true)
                     }
                     "setDnd" -> result.success(setDnd(call.argument<Boolean>("on") == true))
+                    "canWriteSettings" -> result.success(Settings.System.canWrite(this))
+                    "requestWriteSettings" -> {
+                        startActivity(Intent(Settings.ACTION_MANAGE_WRITE_SETTINGS, Uri.parse("package:$packageName")))
+                        result.success(true)
+                    }
+                    "lockRotation" -> result.success(lockRotation(call.argument<String>("mode") ?: "off"))
                     "gameMode" -> result.success(gameMode(call.argument<String>("pkg")!!))
                     "openAppSettings" -> {
                         startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
@@ -160,6 +167,33 @@ class MainActivity : FlutterActivity() {
             savedDndFilter = null
         }
         return true
+    }
+
+    /**
+     * Locks the SYSTEM screen rotation while gaming so the screen can't flip by accident.
+     * mode = "portrait" | "landscape" | "off" (restore previous setting).
+     * Needs "Modify system settings" permission (user grants once).
+     * Note: a game that forces its own orientation always wins.
+     */
+    private fun lockRotation(mode: String): Boolean {
+        if (!Settings.System.canWrite(this)) return false
+        val cr = contentResolver
+        return try {
+            if (mode == "off") {
+                savedAutoRotate?.let { Settings.System.putInt(cr, Settings.System.ACCELEROMETER_ROTATION, it) }
+                savedUserRotation?.let { Settings.System.putInt(cr, Settings.System.USER_ROTATION, it) }
+                savedAutoRotate = null; savedUserRotation = null
+            } else {
+                if (savedAutoRotate == null) {
+                    savedAutoRotate = Settings.System.getInt(cr, Settings.System.ACCELEROMETER_ROTATION, 1)
+                    savedUserRotation = Settings.System.getInt(cr, Settings.System.USER_ROTATION, 0)
+                }
+                Settings.System.putInt(cr, Settings.System.ACCELEROMETER_ROTATION, 0)
+                Settings.System.putInt(cr, Settings.System.USER_ROTATION,
+                    if (mode == "landscape") android.view.Surface.ROTATION_90 else android.view.Surface.ROTATION_0)
+            }
+            true
+        } catch (e: Exception) { false }
     }
 
     // ---------- Android 12+ Game Mode API (read-only for 3rd-party apps)

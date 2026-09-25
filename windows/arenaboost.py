@@ -1,5 +1,6 @@
 """
 ArenaBoost - Safe Game Launcher & Booster for Windows 10/11
+Created by Ghost - Copyright (c) 2026 Ghost - MIT License
 -----------------------------------------------------------
 Design rules (from our research):
   * Only OS-level tweaks. NEVER touches game memory -> anti-cheat safe
@@ -490,19 +491,93 @@ def top_network_users():
 
 
 # ================================================================ UI
-BG, CARD, ACC, FG, MUTED, GOOD, BAD = "#0f1117", "#1a1d27", "#7c5cff", "#e8e8f0", "#8a8fa3", "#3ddc97", "#ff5c7a"
+
+# ================================================================ UI (v2 sleek design)
+APP_NAME, APP_VERSION, AUTHOR = "ArenaBoost", "2.0.0", "Ghost"
+BG, SIDE, CARD, CARD2 = "#0b0d14", "#10131c", "#161a26", "#1e2333"
+ACC, ACC2, FG, MUTED = "#8b5cf6", "#22d3ee", "#eef0f7", "#8a90a6"
+GOOD, WARN, BAD = "#34d399", "#fbbf24", "#f87171"
+FONT = "Segoe UI" if IS_WIN else "DejaVu Sans"
+
+
+def _mix(c1, c2, t):
+    a = [int(c1[i:i + 2], 16) for i in (1, 3, 5)]
+    b = [int(c2[i:i + 2], 16) for i in (1, 3, 5)]
+    return "#%02x%02x%02x" % tuple(int(a[i] + (b[i] - a[i]) * t) for i in range(3))
+
+
+class Ring(tk.Canvas):
+    """Circular gauge."""
+
+    def __init__(self, master, label, size=132, **kw):
+        super().__init__(master, width=size, height=size, bg=CARD, highlightthickness=0, **kw)
+        self.size, self.label = size, label
+        self.set(0, "–")
+
+    def set(self, pct, text, sub=""):
+        s, w = self.size, 11
+        self.delete("all")
+        self.create_oval(w, w, s - w, s - w, outline=CARD2, width=w)
+        pct = max(0.0, min(100.0, float(pct)))
+        col = GOOD if pct < 60 else WARN if pct < 85 else BAD
+        if pct > 0:
+            self.create_arc(w, w, s - w, s - w, start=90, extent=-3.6 * pct, style="arc", outline=col, width=w)
+        self.create_text(s / 2, s / 2 - 8, text=text, fill=FG, font=(FONT, 17, "bold"))
+        self.create_text(s / 2, s / 2 + 16, text=self.label, fill=MUTED, font=(FONT, 9))
+        if sub:
+            self.create_text(s / 2, s - 4, text=sub, fill=MUTED, font=(FONT, 8), anchor="s")
+
+
+class BoostButton(tk.Canvas):
+    """Big glowing circular boost button."""
+
+    def __init__(self, master, command, size=210):
+        super().__init__(master, width=size, height=size, bg=BG, highlightthickness=0, cursor="hand2")
+        self.size, self.command, self.state_txt, self.phase, self.active = size, command, "BOOST", 0, False
+        self.bind("<Button-1>", lambda e: self.command())
+        self.bind("<Enter>", lambda e: self._draw(hover=True))
+        self.bind("<Leave>", lambda e: self._draw())
+        self._draw()
+
+    def set_active(self, active, text):
+        self.active, self.state_txt = active, text
+        self._draw()
+
+    def pulse(self):
+        self.phase = (self.phase + 1) % 40
+        self._draw()
+
+    def _draw(self, hover=False):
+        s = self.size
+        self.delete("all")
+        base = GOOD if self.active else ACC
+        glow = 6 + (abs(20 - self.phase) / 20 * 8 if self.active else 0)
+        for i in range(10, 0, -1):  # glow rings
+            t = i / 10
+            self.create_oval(s / 2 - (70 + glow * t + i * 2.2), s / 2 - (70 + glow * t + i * 2.2),
+                             s / 2 + (70 + glow * t + i * 2.2), s / 2 + (70 + glow * t + i * 2.2),
+                             outline=_mix(BG, base, 0.10 + (1 - t) * 0.25), width=2)
+        r = 74 if hover else 70
+        for i in range(r, 0, -2):  # radial gradient fill
+            self.create_oval(s / 2 - i, s / 2 - i, s / 2 + i, s / 2 + i, outline="",
+                             fill=_mix(base, _mix(base, ACC2 if not self.active else "#065f46", 0.6), i / r))
+        self.create_text(s / 2, s / 2 - 10, text="⚡", fill="white", font=(FONT, 26))
+        self.create_text(s / 2, s / 2 + 26, text=self.state_txt, fill="white", font=(FONT, 14, "bold"))
 
 
 class App(tk.Tk):
+    PAGES = [("home", "🏠", "Dashboard"), ("games", "🎮", "Games"), ("monitor", "📊", "Monitor"),
+             ("network", "🌐", "Network"), ("settings", "⚙", "Settings"), ("about", "ⓘ", "About")]
+
     def __init__(self):
         super().__init__()
-        self.title("ArenaBoost – Game Launcher & Booster")
-        self.geometry("1000x680")
-        self.minsize(900, 600)
+        self.title(f"{APP_NAME} {APP_VERSION} – Game Launcher & Booster · Created by {AUTHOR}")
+        self.geometry("1120x720")
+        self.minsize(980, 640)
         self.configure(bg=BG)
         self.cfg = load_cfg()
         self.engine = BoostEngine(self.cfg, self.log)
-        self.watch_thread = None
+        self._busy = False
         self._style()
         self._build()
         BoostEngine.crash_recover(self.log)
@@ -511,91 +586,202 @@ class App(tk.Tk):
         if not self.cfg["games"]:
             self.scan()
         self.refresh_games()
-        self.after(1000, self.update_monitor)
+        self.show("home")
+        self._last_net = psutil.net_io_counters()
+        self._last_disk = psutil.disk_io_counters()
+        self._tick = 0
+        self.after(800, self.update_monitor)
+        self.after(60, self._animate)
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
-    # ---------- style
+    # ---------------------------------------------------------------- style
     def _style(self):
         s = ttk.Style(self)
         s.theme_use("clam")
-        s.configure(".", background=BG, foreground=FG, fieldbackground=CARD, font=("Segoe UI", 10))
-        s.configure("TNotebook", background=BG, borderwidth=0)
-        s.configure("TNotebook.Tab", background=CARD, foreground=MUTED, padding=(18, 8))
-        s.map("TNotebook.Tab", background=[("selected", ACC)], foreground=[("selected", "white")])
-        s.configure("Card.TFrame", background=CARD)
-        s.configure("TFrame", background=BG)
-        s.configure("TLabel", background=BG)
-        s.configure("Card.TLabel", background=CARD)
-        s.configure("Big.TLabel", background=CARD, font=("Segoe UI", 20, "bold"))
-        s.configure("Muted.TLabel", background=CARD, foreground=MUTED, font=("Segoe UI", 9))
-        s.configure("TButton", background=CARD, foreground=FG, borderwidth=0, padding=8)
-        s.map("TButton", background=[("active", "#2a2e3d")])
-        s.configure("Accent.TButton", background=ACC, foreground="white", font=("Segoe UI", 11, "bold"), padding=12)
-        s.map("Accent.TButton", background=[("active", "#6848f0")])
-        s.configure("Treeview", background=CARD, fieldbackground=CARD, foreground=FG, rowheight=30, borderwidth=0)
-        s.configure("Treeview.Heading", background="#232736", foreground=MUTED, borderwidth=0)
-        s.map("Treeview", background=[("selected", ACC)])
-        s.configure("TCheckbutton", background=CARD, foreground=FG)
+        s.configure(".", background=BG, foreground=FG, fieldbackground=CARD, font=(FONT, 10))
+        s.configure("Treeview", background=CARD, fieldbackground=CARD, foreground=FG, rowheight=34, borderwidth=0)
+        s.configure("Treeview.Heading", background=CARD2, foreground=MUTED, borderwidth=0, font=(FONT, 9, "bold"))
+        s.map("Treeview", background=[("selected", ACC)], foreground=[("selected", "white")])
+        s.configure("TCheckbutton", background=CARD, foreground=FG, font=(FONT, 10))
         s.map("TCheckbutton", background=[("active", CARD)])
-        s.configure("Horizontal.TProgressbar", background=ACC, troughcolor="#232736", borderwidth=0)
+        s.configure("Vertical.TScrollbar", background=CARD2, troughcolor=CARD, borderwidth=0, arrowcolor=MUTED)
 
-    # ---------- layout
+    def btn(self, parent, text, cmd, kind="ghost", **kw):
+        colors = {"primary": (ACC, "#7c3aed", "white"), "ghost": (CARD2, "#2a3046", FG), "danger": ("#3a1d25", "#522530", BAD)}
+        bg, hov, fg = colors[kind]
+        b = tk.Label(parent, text=text, bg=bg, fg=fg, font=(FONT, 10, "bold" if kind == "primary" else "normal"),
+                     padx=16, pady=9, cursor="hand2", **kw)
+        b.bind("<Button-1>", lambda e: cmd())
+        b.bind("<Enter>", lambda e: b.config(bg=hov))
+        b.bind("<Leave>", lambda e: b.config(bg=bg))
+        return b
+
+    def card(self, parent, **kw):
+        return tk.Frame(parent, bg=CARD, highlightthickness=1, highlightbackground="#232a3d", **kw)
+
+    def h1(self, parent, text, sub=None):
+        f = tk.Frame(parent, bg=BG)
+        f.pack(fill="x", pady=(0, 14))
+        tk.Label(f, text=text, bg=BG, fg=FG, font=(FONT, 20, "bold")).pack(anchor="w")
+        if sub:
+            tk.Label(f, text=sub, bg=BG, fg=MUTED, font=(FONT, 10)).pack(anchor="w")
+        return f
+
+    # ---------------------------------------------------------------- layout
     def _build(self):
-        top = ttk.Frame(self)
-        top.pack(fill="x", padx=16, pady=(14, 6))
-        tk.Label(top, text="⚡ ArenaBoost", bg=BG, fg=FG, font=("Segoe UI", 18, "bold")).pack(side="left")
-        self.status = tk.Label(top, text="● Idle", bg=BG, fg=MUTED, font=("Segoe UI", 11, "bold"))
-        self.status.pack(side="right")
+        side = tk.Frame(self, bg=SIDE, width=210)
+        side.pack(side="left", fill="y")
+        side.pack_propagate(False)
+        logo = tk.Frame(side, bg=SIDE)
+        logo.pack(fill="x", pady=(22, 26), padx=18)
+        tk.Label(logo, text="⚡", bg=SIDE, fg=ACC, font=(FONT, 22, "bold")).pack(side="left")
+        tk.Label(logo, text=APP_NAME, bg=SIDE, fg=FG, font=(FONT, 16, "bold")).pack(side="left", padx=6)
+        self.nav = {}
+        for key, icon, label in self.PAGES:
+            b = tk.Label(side, text=f"  {icon}   {label}", anchor="w", bg=SIDE, fg=MUTED, font=(FONT, 11),
+                         padx=14, pady=10, cursor="hand2")
+            b.pack(fill="x", padx=10, pady=2)
+            b.bind("<Button-1>", lambda e, k=key: self.show(k))
+            self.nav[key] = b
+        foot = tk.Frame(side, bg=SIDE)
+        foot.pack(side="bottom", fill="x", padx=18, pady=16)
+        self.status = tk.Label(foot, text="● Idle", bg=SIDE, fg=MUTED, font=(FONT, 10, "bold"))
+        self.status.pack(anchor="w")
+        tk.Label(foot, text="🛡 Admin" if is_admin() else "⚠ Limited mode", bg=SIDE,
+                 fg=GOOD if is_admin() else WARN, font=(FONT, 9)).pack(anchor="w", pady=(4, 8))
+        tk.Label(foot, text=f"Created by {AUTHOR}", bg=SIDE, fg=ACC, font=(FONT, 9, "bold")).pack(anchor="w")
+        tk.Label(foot, text=f"v{APP_VERSION} · MIT License", bg=SIDE, fg=MUTED, font=(FONT, 8)).pack(anchor="w")
 
-        nb = ttk.Notebook(self)
-        nb.pack(fill="both", expand=True, padx=16, pady=6)
-        self.tab_games, self.tab_mon, self.tab_net, self.tab_set = (ttk.Frame(nb) for _ in range(4))
-        nb.add(self.tab_games, text="🎮  Games")
-        nb.add(self.tab_mon, text="📊  Monitor")
-        nb.add(self.tab_net, text="🌐  Network")
-        nb.add(self.tab_set, text="⚙  Settings")
-        self._games_tab()
-        self._monitor_tab()
-        self._net_tab()
-        self._settings_tab()
+        main = tk.Frame(self, bg=BG)
+        main.pack(side="left", fill="both", expand=True)
+        self.pages_host = tk.Frame(main, bg=BG)
+        self.pages_host.pack(fill="both", expand=True, padx=26, pady=(22, 8))
+        self.pages = {k: tk.Frame(self.pages_host, bg=BG) for k, _, _ in self.PAGES}
+        self._home_page(self.pages["home"])
+        self._games_page(self.pages["games"])
+        self._monitor_page(self.pages["monitor"])
+        self._net_page(self.pages["network"])
+        self._settings_page(self.pages["settings"])
+        self._about_page(self.pages["about"])
 
-        lf = ttk.Frame(self, style="Card.TFrame")
-        lf.pack(fill="x", padx=16, pady=(4, 14))
-        self.logbox = tk.Text(lf, height=7, bg=CARD, fg=MUTED, bd=0, font=("Consolas", 9), wrap="word")
-        self.logbox.pack(fill="x", padx=10, pady=8)
+        lf = self.card(main)
+        lf.pack(fill="x", padx=26, pady=(0, 18))
+        tk.Label(lf, text="ACTIVITY", bg=CARD, fg=MUTED, font=(FONT, 8, "bold")).pack(anchor="w", padx=12, pady=(8, 0))
+        self.logbox = tk.Text(lf, height=6, bg=CARD, fg="#b7bdd1", bd=0, font=("Consolas", 9), wrap="word",
+                              highlightthickness=0)
+        self.logbox.pack(fill="x", padx=12, pady=(2, 10))
+
+    def show(self, key):
+        for k, f in self.pages.items():
+            f.pack_forget()
+            self.nav[k].config(bg=SIDE, fg=MUTED)
+        self.pages[key].pack(fill="both", expand=True)
+        self.nav[key].config(bg=CARD2, fg=FG)
+        self.current = key
 
     def log(self, msg):
         log.info(msg)
 
         def _w():
-            self.logbox.insert("end", time.strftime("[%H:%M:%S] ") + msg + "\n")
-            self.logbox.see("end")
+            try:
+                self.logbox.insert("end", time.strftime("%H:%M:%S  ") + msg + "\n")
+                self.logbox.see("end")
+            except tk.TclError:
+                pass
         try:
             self.after(0, _w)
         except Exception:
             pass
 
-    # ---------- games tab
-    def _games_tab(self):
-        f = self.tab_games
-        bar = ttk.Frame(f)
-        bar.pack(fill="x", pady=8)
-        ttk.Button(bar, text="🚀  BOOST & LAUNCH", style="Accent.TButton", command=self.boost_launch).pack(side="left")
-        ttk.Button(bar, text="Boost only", command=self.boost_only).pack(side="left", padx=6)
-        ttk.Button(bar, text="Restore now", command=self.restore_now).pack(side="left")
-        ttk.Button(bar, text="🔍 Scan games", command=lambda: (self.scan(), self.refresh_games())).pack(side="right")
-        ttk.Button(bar, text="➕ Add game", command=self.add_game).pack(side="right", padx=6)
-        ttk.Button(bar, text="✏ Edit", command=self.edit_game).pack(side="right")
-        ttk.Button(bar, text="🗑", command=self.remove_game).pack(side="right", padx=6)
-        self.tree = ttk.Treeview(f, columns=("src", "proc", "folder"), show="tree headings")
-        self.tree.heading("#0", text="Game")
-        self.tree.heading("src", text="Source")
-        self.tree.heading("proc", text="Game .exe (for auto-restore)")
-        self.tree.heading("folder", text="Install folder")
-        self.tree.column("#0", width=260)
-        self.tree.column("src", width=90)
-        self.tree.column("proc", width=200)
-        self.tree.pack(fill="both", expand=True)
+    def set_status(self, text, color):
+        def _u():
+            self.status.config(text=text, fg=color)
+            active = "BOOSTED" in text
+            self.boost_btn.set_active(active, "BOOSTED" if active else ("…" if "Boost" in text else "BOOST"))
+            self.hero_state.config(text="Your PC is boosted 🚀" if active else "Ready to boost",
+                                   fg=GOOD if active else FG)
+        try:
+            self.after(0, _u)
+        except Exception:
+            pass
+
+    def _animate(self):
+        if self.engine.active:
+            self.boost_btn.pulse()
+        self.after(60, self._animate)
+
+    # ---------------------------------------------------------------- dashboard
+    def _home_page(self, p):
+        top = tk.Frame(p, bg=BG)
+        top.pack(fill="x")
+        left = tk.Frame(top, bg=BG)
+        left.pack(side="left", fill="both", expand=True)
+        tk.Label(left, text="Welcome back, gamer", bg=BG, fg=MUTED, font=(FONT, 11)).pack(anchor="w")
+        self.hero_state = tk.Label(left, text="Ready to boost", bg=BG, fg=FG, font=(FONT, 26, "bold"))
+        self.hero_state.pack(anchor="w", pady=(2, 6))
+        tk.Label(left, text="One click frees CPU, RAM, disk and bandwidth for your game —\n"
+                            "and everything is restored automatically when you stop.",
+                 bg=BG, fg=MUTED, justify="left", font=(FONT, 10)).pack(anchor="w")
+        row = tk.Frame(left, bg=BG)
+        row.pack(anchor="w", pady=16)
+        self.btn(row, "🎮  Launch a game", lambda: self.show("games"), "primary").pack(side="left")
+        self.btn(row, "↺  Restore now", self.restore_now).pack(side="left", padx=8)
+        self.btn(row, "📡  Test ping", lambda: (self.show("network"), self.ping_all())).pack(side="left")
+        self.boost_btn = BoostButton(top, self.toggle_boost)
+        self.boost_btn.pack(side="right", padx=10)
+
+        rings = self.card(p)
+        rings.pack(fill="x", pady=(14, 0))
+        self.rings = {}
+        for i, k in enumerate(["CPU", "RAM", "Disk", "Net"]):
+            r = Ring(rings, k)
+            r.grid(row=0, column=i, padx=18, pady=16)
+            rings.columnconfigure(i, weight=1)
+            self.rings[k] = r
+
+        tips = self.card(p)
+        tips.pack(fill="x", pady=12)
+        self.tip_lbl = tk.Label(tips, text="", bg=CARD, fg=MUTED, font=(FONT, 10), justify="left", wraplength=780)
+        self.tip_lbl.pack(anchor="w", padx=16, pady=12)
+        self._tips = ["💡 Ethernet beats Wi-Fi for ping and stability.", "💡 Close the browser — it's the #1 RAM hog.",
+                      "💡 Keep your game on an SSD to stop open-world stutter.",
+                      "💡 Pick the closest server region (Bahrain / UAE / Mumbai for Pakistan).",
+                      "💡 Over 90°C? Clean the dust — no software fixes throttling."]
+        self._tip_i = 0
+        self._rotate_tip()
+
+    def _rotate_tip(self):
+        self.tip_lbl.config(text=self._tips[self._tip_i % len(self._tips)])
+        self._tip_i += 1
+        self.after(6000, self._rotate_tip)
+
+    def toggle_boost(self):
+        (self.restore_now if self.engine.active else self.boost_only)()
+
+    # ---------------------------------------------------------------- games
+    def _games_page(self, p):
+        hdr = self.h1(p, "Games", "Double-click a game to Boost & Launch. Settings restore when it closes.")
+        bar = tk.Frame(p, bg=BG)
+        bar.pack(fill="x", pady=(0, 10))
+        self.btn(bar, "🚀  BOOST & LAUNCH", self.boost_launch, "primary").pack(side="left")
+        self.btn(bar, "🔍 Scan", lambda: (self.scan(), self.refresh_games())).pack(side="right")
+        self.btn(bar, "➕ Add", self.add_game).pack(side="right", padx=6)
+        self.btn(bar, "✏ Edit", self.edit_game).pack(side="right")
+        self.btn(bar, "🗑 Remove", self.remove_game, "danger").pack(side="right", padx=6)
+        self.search = tk.StringVar()
+        e = tk.Entry(bar, textvariable=self.search, bg=CARD2, fg=FG, insertbackground=FG, bd=0, width=24,
+                     font=(FONT, 10))
+        e.pack(side="left", padx=12, ipady=8)
+        e.insert(0, "")
+        self.search.trace_add("write", lambda *a: self.refresh_games())
+        box = self.card(p)
+        box.pack(fill="both", expand=True)
+        self.tree = ttk.Treeview(box, columns=("src", "proc", "folder"), show="tree headings")
+        for c, t, w in [("#0", "GAME", 260), ("src", "SOURCE", 90), ("proc", "GAME EXE (auto-restore)", 220),
+                        ("folder", "INSTALL FOLDER", 300)]:
+            self.tree.heading(c, text=t, anchor="w")
+            self.tree.column(c, width=w, anchor="w")
+        self.tree.pack(fill="both", expand=True, padx=2, pady=2)
         self.tree.bind("<Double-1>", lambda e: self.boost_launch())
 
     def scan(self):
@@ -607,27 +793,33 @@ class App(tk.Tk):
         self.log(f"🔍 Scan complete: {len(new)} new games found ({len(self.cfg['games'])} total)")
 
     def refresh_games(self):
+        q = self.search.get().lower().strip() if hasattr(self, "search") else ""
         self.tree.delete(*self.tree.get_children())
         for i, g in enumerate(self.cfg["games"]):
+            if q and q not in g["name"].lower():
+                continue
             self.tree.insert("", "end", iid=str(i), text="  " + g["name"],
                              values=(g["source"], g.get("process") or "(auto: folder)", g.get("folder", "")))
 
     def selected_game(self):
         sel = self.tree.selection()
         if not sel:
-            messagebox.showinfo("ArenaBoost", "Select a game first.")
+            messagebox.showinfo(APP_NAME, "Select a game first.")
             return None
         return self.cfg["games"][int(sel[0])]
 
     def add_game(self):
         p = filedialog.askopenfilename(title="Select game .exe", filetypes=[("Programs", "*.exe")])
-        if not p:
-            return
+        if p:
+            self.add_game_path(p)
+
+    def add_game_path(self, p):
         name = os.path.splitext(os.path.basename(p))[0]
         self.cfg["games"].append({"name": name, "source": "Manual", "launch": p,
                                   "folder": os.path.dirname(p), "process": os.path.basename(p)})
         save_cfg(self.cfg)
         self.refresh_games()
+        return self.cfg["games"][-1]
 
     def edit_game(self):
         g = self.selected_game()
@@ -635,14 +827,14 @@ class App(tk.Tk):
             return
         w = tk.Toplevel(self, bg=BG)
         w.title("Edit game")
-        w.geometry("560x260")
+        w.geometry("600x300")
         entries = {}
         for i, (k, lbl) in enumerate([("name", "Name"), ("launch", "Launch command / exe / URL"),
                                       ("folder", "Install folder"), ("process", "Game process .exe (optional)")]):
-            tk.Label(w, text=lbl, bg=BG, fg=MUTED).grid(row=i, column=0, sticky="w", padx=10, pady=6)
-            e = tk.Entry(w, width=52, bg=CARD, fg=FG, insertbackground=FG, bd=0)
+            tk.Label(w, text=lbl, bg=BG, fg=MUTED).grid(row=i, column=0, sticky="w", padx=14, pady=8)
+            e = tk.Entry(w, width=50, bg=CARD2, fg=FG, insertbackground=FG, bd=0)
             e.insert(0, g.get(k, ""))
-            e.grid(row=i, column=1, padx=10, pady=6)
+            e.grid(row=i, column=1, padx=10, pady=8, ipady=6)
             entries[k] = e
 
         def ok():
@@ -651,7 +843,7 @@ class App(tk.Tk):
             save_cfg(self.cfg)
             self.refresh_games()
             w.destroy()
-        ttk.Button(w, text="Save", style="Accent.TButton", command=ok).grid(row=5, column=1, sticky="e", padx=10, pady=10)
+        self.btn(w, "Save", ok, "primary").grid(row=5, column=1, sticky="e", padx=10, pady=12)
 
     def remove_game(self):
         sel = self.tree.selection()
@@ -660,121 +852,150 @@ class App(tk.Tk):
             save_cfg(self.cfg)
             self.refresh_games()
 
-    # ---------- boost flow
-    def set_status(self, text, color):
-        self.after(0, lambda: self.status.config(text=text, fg=color))
-
+    # ---------------------------------------------------------------- boost flow
     def boost_only(self):
-        if self.engine.active:
+        if self.engine.active or self._busy:
             return self.log("Already boosted.")
-        threading.Thread(target=lambda: (self.engine.apply(), self.set_status("● BOOSTED", GOOD)), daemon=True).start()
+        self._busy = True
+
+        def w():
+            self.set_status("● Boosting…", ACC)
+            self.engine.apply()
+            self._busy = False
+            self.set_status("● BOOSTED", GOOD)
+        threading.Thread(target=w, daemon=True).start()
 
     def restore_now(self):
-        threading.Thread(target=lambda: (self.engine.restore(), self.set_status("● Idle", MUTED)), daemon=True).start()
+        def w():
+            self.engine.restore()
+            self.set_status("● Idle", MUTED)
+        threading.Thread(target=w, daemon=True).start()
 
     def boost_launch(self):
         g = self.selected_game()
         if not g:
             return
-        if self.engine.active:
+        if self.engine.active or self._busy:
             return self.log("Already boosted – restore first or wait for game to close.")
         threading.Thread(target=self._boost_launch_worker, args=(g,), daemon=True).start()
 
-    def _boost_launch_worker(self, g):
-        self.log(f"🚀 Boosting for {g['name']}…")
-        self.set_status("● Boosting…", ACC)
-        self.engine.apply()
-        self.set_status("● BOOSTED", GOOD)
-        launch = g["launch"]
+    def _boost_launch_worker(self, g, detect_timeout=180, poll=5):
+        """Returns a result string (used by self-test)."""
+        self._busy = True
         try:
-            if "://" in launch and not launch.startswith('"'):
-                os.startfile(launch) if IS_WIN else None
-            elif launch.startswith('"') or " --" in launch:
-                subprocess.Popen(launch, shell=True, cwd=g.get("folder") or None)
-            else:
-                subprocess.Popen([launch], cwd=os.path.dirname(launch) or None)
-        except Exception as e:
-            self.log(f"❌ Launch failed: {e}")
+            self.log(f"🚀 Boosting for {g['name']}…")
+            self.set_status("● Boosting…", ACC)
+            self.engine.apply()
+            self.set_status("● BOOSTED", GOOD)
+            launch = g["launch"]
+            try:
+                if "://" in launch and not launch.startswith('"'):
+                    if IS_WIN:
+                        os.startfile(launch)
+                elif launch.startswith('"') or " --" in launch:
+                    subprocess.Popen(launch, shell=True, cwd=g.get("folder") or None)
+                else:
+                    subprocess.Popen([launch], cwd=os.path.dirname(launch) or None)
+            except Exception as e:
+                self.log(f"❌ Launch failed: {e}")
+                self.engine.restore()
+                self.set_status("● Idle", MUTED)
+                return "launch_failed"
+            self.log("⏳ Waiting for game process…")
+            procs, t0 = [], time.time()
+            while time.time() - t0 < detect_timeout and not procs:
+                time.sleep(min(2, poll))
+                procs = find_game_procs(g)
+            if not procs:
+                self.log("⚠ Game process not detected. Tweaks stay ON – press 'Restore now' when done "
+                         "(tip: set the game .exe in Edit).")
+                return "not_detected"
+
+            def rss(p):
+                try:
+                    return p.memory_info().rss
+                except Exception:
+                    return 0
+            main = max(procs, key=rss)
+            try:
+                self.log(f"🎮 Detected {main.name()} (PID {main.pid})")
+            except Exception:
+                pass
+            if self.cfg["opt"]["priority"]:
+                for p in procs:
+                    try:
+                        p.nice(psutil.ABOVE_NORMAL_PRIORITY_CLASS if IS_WIN else 5)
+                    except Exception:
+                        pass
+                self.log("⬆ Game priority -> Above Normal (safe, never Realtime)")
+            while True:
+                time.sleep(poll)
+                alive = find_game_procs(g)
+                if not alive:
+                    break
+                if self.cfg["opt"]["suspend"]:
+                    pids = {p.pid for p in alive}
+                    extra = WinTweaks.suspend_hogs(self.cfg["hogs"], pids)
+                    extra = [x for x in extra if x not in self.engine.state.get("suspended", [])]
+                    if extra:
+                        self.engine.state.setdefault("suspended", []).extend(extra)
+                        self.engine._save_state()
+            self.log(f"🏁 {g['name']} closed.")
             self.engine.restore()
             self.set_status("● Idle", MUTED)
-            return
-        self.log("⏳ Waiting for game process (up to 3 min)…")
-        procs, t0 = [], time.time()
-        while time.time() - t0 < 180 and not procs:
-            time.sleep(2)
-            procs = find_game_procs(g)
-        if not procs:
-            self.log("⚠ Game process not detected. Tweaks stay ON – press 'Restore now' when done "
-                     "(tip: set the game .exe in Edit).")
-            return
-        main = max(procs, key=lambda p: (p.memory_info().rss if p.is_running() else 0))
-        self.log(f"🎮 Detected {main.name()} (PID {main.pid})")
-        if self.cfg["opt"]["priority"]:
-            for p in procs:
-                try:
-                    p.nice(psutil.ABOVE_NORMAL_PRIORITY_CLASS if IS_WIN else -5)
-                except Exception:
-                    pass
-            self.log("⬆ Game priority -> Above Normal (safe, never Realtime)")
-        # keep re-suspending hogs that respawn, until game exits
-        while True:
-            time.sleep(5)
-            alive = find_game_procs(g)
-            if not alive:
-                break
-            if self.cfg["opt"]["suspend"]:
-                pids = {p.pid for p in alive}
-                extra = WinTweaks.suspend_hogs(self.cfg["hogs"], pids)
-                extra = [x for x in extra if x not in self.engine.state.get("suspended", [])]
-                if extra:
-                    self.engine.state.setdefault("suspended", []).extend(extra)
-                    self.engine._save_state()
-        self.log(f"🏁 {g['name']} closed.")
-        self.engine.restore()
-        self.set_status("● Idle", MUTED)
+            return "ok"
+        except Exception as e:  # never leave the PC in boosted state because of a bug
+            log.exception("boost worker")
+            self.log(f"❌ Error: {e} – restoring")
+            self.engine.restore()
+            self.set_status("● Idle", MUTED)
+            return "error"
+        finally:
+            self._busy = False
 
-    # ---------- monitor tab
-    def _monitor_tab(self):
-        f = self.tab_mon
-        grid = ttk.Frame(f)
-        grid.pack(fill="x", pady=10)
+    # ---------------------------------------------------------------- monitor
+    def _monitor_page(self, p):
+        self.h1(p, "Monitor", "Live system usage. Top processes refresh every 3 seconds.")
+        grid = tk.Frame(p, bg=BG)
+        grid.pack(fill="x")
         self.cards = {}
         for i, k in enumerate(["CPU", "RAM", "Disk", "Network"]):
-            c = ttk.Frame(grid, style="Card.TFrame")
-            c.grid(row=0, column=i, sticky="nsew", padx=6)
+            c = self.card(grid)
+            c.grid(row=0, column=i, sticky="nsew", padx=(0 if i == 0 else 10, 0))
             grid.columnconfigure(i, weight=1)
-            ttk.Label(c, text=k, style="Muted.TLabel").pack(anchor="w", padx=14, pady=(12, 0))
-            v = ttk.Label(c, text="–", style="Big.TLabel")
+            tk.Label(c, text=k.upper(), bg=CARD, fg=MUTED, font=(FONT, 8, "bold")).pack(anchor="w", padx=14, pady=(12, 0))
+            v = tk.Label(c, text="–", bg=CARD, fg=FG, font=(FONT, 20, "bold"))
             v.pack(anchor="w", padx=14)
-            sub = ttk.Label(c, text="", style="Muted.TLabel")
+            sub = tk.Label(c, text="", bg=CARD, fg=MUTED, font=(FONT, 9))
             sub.pack(anchor="w", padx=14)
-            pb = ttk.Progressbar(c, maximum=100)
-            pb.pack(fill="x", padx=14, pady=(6, 14))
-            self.cards[k] = (v, sub, pb)
-        rowf = ttk.Frame(f)
-        rowf.pack(fill="x")
-        ttk.Button(rowf, text="🧹 Purge standby RAM now", command=lambda: self.log(
-            "🧹 " + WinTweaks.purge_standby())).pack(side="left", padx=6)
-        ttk.Button(rowf, text="⚠ Check overlays/stutter causes", command=self.check_overlays).pack(side="left")
-        ttk.Label(f, text="Top processes by CPU / RAM", foreground=MUTED).pack(anchor="w", pady=(12, 2))
-        self.ptree = ttk.Treeview(f, columns=("cpu", "ram"), show="tree headings", height=9)
-        self.ptree.heading("#0", text="Process")
+            bar = tk.Canvas(c, height=6, bg=CARD2, highlightthickness=0)
+            bar.pack(fill="x", padx=14, pady=(8, 14))
+            self.cards[k] = (v, sub, bar)
+        rowf = tk.Frame(p, bg=BG)
+        rowf.pack(fill="x", pady=12)
+        self.btn(rowf, "🧹 Purge standby RAM", lambda: self.log("🧹 " + WinTweaks.purge_standby())).pack(side="left")
+        self.btn(rowf, "⚠ Find stutter causes", self.check_overlays).pack(side="left", padx=8)
+        box = self.card(p)
+        box.pack(fill="both", expand=True)
+        self.ptree = ttk.Treeview(box, columns=("cpu", "ram"), show="tree headings")
+        self.ptree.heading("#0", text="PROCESS", anchor="w")
         self.ptree.heading("cpu", text="CPU %")
         self.ptree.heading("ram", text="RAM MB")
-        self.ptree.pack(fill="both", expand=True)
-        self._last_net = psutil.net_io_counters()
-        self._last_disk = psutil.disk_io_counters()
-        self._tick = 0
+        self.ptree.pack(fill="both", expand=True, padx=2, pady=2)
 
     def check_overlays(self):
         w = WinTweaks.overlay_warnings()
         for x in w or ["No common overlay problems found."]:
             self.log("⚠ " + x)
-        disk = psutil.disk_usage(os.environ.get("SystemDrive", "/") + os.sep)
-        if disk.percent > 90:
-            self.log("⚠ System drive over 90% full - can cause stutter.")
+        try:
+            disk = psutil.disk_usage(os.environ.get("SystemDrive", "/") + os.sep)
+            if disk.percent > 90:
+                self.log("⚠ System drive over 90% full - can cause stutter.")
+        except Exception:
+            pass
         if psutil.virtual_memory().total < 8.5 * 2**30:
             self.log("ℹ Under 8 GB RAM: close browsers before gaming; standby purge helps you most.")
+        return w
 
     def update_monitor(self):
         try:
@@ -784,15 +1005,20 @@ class App(tk.Tk):
             d = psutil.disk_io_counters()
             down = (n.bytes_recv - self._last_net.bytes_recv) / 1024
             up = (n.bytes_sent - self._last_net.bytes_sent) / 1024
-            dmb = ((d.read_bytes + d.write_bytes) - (self._last_disk.read_bytes + self._last_disk.write_bytes)) / 2**20 if d else 0
+            dmb = (((d.read_bytes + d.write_bytes) - (self._last_disk.read_bytes + self._last_disk.write_bytes)) / 2**20
+                   if d and self._last_disk else 0)
             self._last_net, self._last_disk = n, d
             freq = psutil.cpu_freq()
-            self._card("CPU", f"{cpu:.0f}%", f"{psutil.cpu_count()} threads" + (f" • {freq.current:.0f} MHz" if freq else ""), cpu)
+            self._card("CPU", f"{cpu:.0f}%", f"{psutil.cpu_count()} threads" + (f" · {freq.current:.0f} MHz" if freq else ""), cpu)
             self._card("RAM", f"{vm.percent:.0f}%", f"{vm.used/2**30:.1f} / {vm.total/2**30:.1f} GB", vm.percent)
             self._card("Disk", f"{dmb:.1f} MB/s", "read + write", min(100, dmb))
-            self._card("Network", f"↓{down:.0f} KB/s", f"↑{up:.0f} KB/s", min(100, down / 50))
+            self._card("Network", f"↓ {down:.0f} KB/s", f"↑ {up:.0f} KB/s", min(100, down / 50))
+            self.rings["CPU"].set(cpu, f"{cpu:.0f}%")
+            self.rings["RAM"].set(vm.percent, f"{vm.percent:.0f}%", f"{vm.available/2**30:.1f} GB free")
+            self.rings["Disk"].set(min(100, dmb), f"{dmb:.0f}", "MB/s")
+            self.rings["Net"].set(min(100, down / 50), f"{down:.0f}", "KB/s down")
             self._tick += 1
-            if self._tick % 3 == 0:
+            if self._tick % 3 == 0 and self.current == "monitor":
                 procs = []
                 for p in psutil.process_iter(["name", "cpu_percent", "memory_info"]):
                     try:
@@ -801,48 +1027,57 @@ class App(tk.Tk):
                         pass
                 procs.sort(key=lambda x: (-x[1], -x[2]))
                 self.ptree.delete(*self.ptree.get_children())
-                for name, c, r in procs[:12]:
+                for name, c, r in procs[:14]:
                     self.ptree.insert("", "end", text="  " + str(name), values=(f"{c:.1f}", f"{r:.0f}"))
         except Exception as e:
             log.error("monitor %s", e)
         self.after(1000, self.update_monitor)
 
     def _card(self, k, v, sub, pct):
-        a, b, pb = self.cards[k]
+        a, b, bar = self.cards[k]
         a.config(text=v)
         b.config(text=sub)
-        pb["value"] = pct
+        bar.update_idletasks()
+        w = max(1, bar.winfo_width())
+        bar.delete("all")
+        col = GOOD if pct < 60 else WARN if pct < 85 else BAD
+        bar.create_rectangle(0, 0, w * max(0, min(100, pct)) / 100, 6, fill=col, outline="")
 
-    # ---------- network tab
-    def _net_tab(self):
-        f = self.tab_net
-        bar = ttk.Frame(f)
-        bar.pack(fill="x", pady=8)
-        ttk.Button(bar, text="📡 Test ping to regions", style="Accent.TButton", command=self.ping_all).pack(side="left")
-        ttk.Button(bar, text="🔎 Find bandwidth hogs", command=self.find_hogs).pack(side="left", padx=6)
-        ttk.Button(bar, text="Flush DNS", command=lambda: self.log(run("ipconfig /flushdns").strip()[:120])).pack(side="left")
-        self.ntree = ttk.Treeview(f, columns=("ping", "jit", "loss", "q"), show="tree headings", height=8)
-        for c, t in [("#0", "Region"), ("ping", "Ping ms"), ("jit", "Jitter ms"), ("loss", "Loss %"), ("q", "Quality")]:
-            self.ntree.heading(c, text=t)
-        self.ntree.pack(fill="x")
-        tips = ("Honest tips: Software cannot shorten the distance to a server. Real ping wins come from: "
-                "Ethernet cable instead of Wi-Fi • 5 GHz Wi-Fi if no cable • choosing the closest region "
-                "(for Pakistan usually Bahrain/UAE/Mumbai) • pausing downloads/streams on ALL devices • "
-                "a routing service (ExitLag/Mudfish) if your ISP routes badly. ArenaBoost pauses local "
-                "bandwidth hogs (browsers, torrents, updates, OneDrive) while you play.")
-        tk.Label(f, text=tips, bg=CARD, fg=MUTED, wraplength=920, justify="left", padx=12, pady=10).pack(fill="x", pady=10)
-        self.htree = ttk.Treeview(f, columns=("pid", "conn"), show="tree headings", height=6)
-        self.htree.heading("#0", text="Process with most connections")
+    # ---------------------------------------------------------------- network
+    def _net_page(self, p):
+        self.h1(p, "Network", "Ping, jitter and packet loss to game regions (TCP, no admin needed).")
+        bar = tk.Frame(p, bg=BG)
+        bar.pack(fill="x", pady=(0, 10))
+        self.btn(bar, "📡  Test all regions", self.ping_all, "primary").pack(side="left")
+        self.btn(bar, "🔎 Bandwidth hogs", self.find_hogs).pack(side="left", padx=8)
+        self.btn(bar, "Flush DNS", lambda: self.log(run("ipconfig /flushdns").strip()[:120])).pack(side="left")
+        box = self.card(p)
+        box.pack(fill="x")
+        self.ntree = ttk.Treeview(box, columns=("ping", "jit", "loss", "q"), show="tree headings", height=7)
+        for c, t in [("#0", "REGION"), ("ping", "PING ms"), ("jit", "JITTER ms"), ("loss", "LOSS %"), ("q", "QUALITY")]:
+            self.ntree.heading(c, text=t, anchor="w")
+        self.ntree.pack(fill="x", padx=2, pady=2)
+        tip = self.card(p)
+        tip.pack(fill="x", pady=10)
+        tk.Label(tip, text="Honest note: software can't shorten the distance to a server. Real ping wins: Ethernet cable • "
+                           "5 GHz Wi-Fi • closest region • pause downloads on ALL devices • a routing service if your ISP "
+                           "routes badly. ArenaBoost pauses local bandwidth hogs while you play.",
+                 bg=CARD, fg=MUTED, wraplength=820, justify="left").pack(anchor="w", padx=14, pady=10)
+        box2 = self.card(p)
+        box2.pack(fill="both", expand=True)
+        self.htree = ttk.Treeview(box2, columns=("pid", "conn"), show="tree headings", height=5)
+        self.htree.heading("#0", text="PROCESS WITH MOST CONNECTIONS", anchor="w")
         self.htree.heading("pid", text="PID")
-        self.htree.heading("conn", text="Connections")
-        self.htree.pack(fill="both", expand=True)
+        self.htree.heading("conn", text="CONNECTIONS")
+        self.htree.pack(fill="both", expand=True, padx=2, pady=2)
 
-    def ping_all(self):
+    def ping_all(self, targets=None, done=None):
         self.ntree.delete(*self.ntree.get_children())
-        self.log("📡 Testing ping… (TCP, no admin needed)")
+        self.log("📡 Testing ping…")
+        targets = targets or PING_TARGETS
 
         def work():
-            for region, host in PING_TARGETS.items():
+            for region, host in targets.items():
                 r = tcp_ping(host)
                 if r:
                     avg, jit, loss = r
@@ -852,6 +1087,8 @@ class App(tk.Tk):
                     vals = ("timeout", "-", "100", "Unreachable")
                 self.after(0, lambda reg=region, v=vals: self.ntree.insert("", "end", text="  " + reg, values=v))
             self.log("📡 Ping test done. High jitter = Wi-Fi or someone downloading.")
+            if done:
+                done()
         threading.Thread(target=work, daemon=True).start()
 
     def find_hogs(self):
@@ -859,30 +1096,32 @@ class App(tk.Tk):
         for name, pid, n in top_network_users():
             self.htree.insert("", "end", text="  " + name, values=(pid, n))
 
-    # ---------- settings tab
-    def _settings_tab(self):
-        f = ttk.Frame(self.tab_set, style="Card.TFrame")
-        f.pack(fill="both", expand=True, pady=10)
+    # ---------------------------------------------------------------- settings
+    def _settings_page(self, p):
+        self.h1(p, "Settings", "Choose what Boost does. Every change is undone automatically.")
+        f = self.card(p)
+        f.pack(fill="x")
         self.vars = {}
-        opts = [("power", "Switch to Ultimate/High Performance power plan (restored after)"),
-                ("priority", "Raise game priority to Above Normal (never Realtime)"),
-                ("suspend", "Suspend background hogs (resumed after, no data loss)"),
-                ("services", "Pause Windows Update / Delivery Optimization / Search / SysMain / BITS (admin)"),
-                ("standby", "One-time standby RAM purge before launch (admin) – no looping 'RAM cleaner'"),
-                ("timer", "0.5 ms timer resolution while boosted (smoother frame pacing in some games)"),
-                ("gamebar_warn", "Warn about overlays/recording that cause stutter")]
+        opts = [("power", "Ultimate / High Performance power plan"),
+                ("priority", "Game priority → Above Normal (never Realtime)"),
+                ("suspend", "Suspend background apps (resumed after, no data loss)"),
+                ("services", "Pause Windows Update, Delivery Optimization, Search, SysMain, BITS (admin)"),
+                ("standby", "One-time standby RAM purge before launch (admin)"),
+                ("timer", "0.5 ms timer resolution while boosted"),
+                ("gamebar_warn", "Warn about overlays / recording that cause stutter")]
         for k, t in opts:
             v = tk.BooleanVar(value=self.cfg["opt"].get(k, True))
             self.vars[k] = v
-            ttk.Checkbutton(f, text=t, variable=v, command=self.save_opts).pack(anchor="w", padx=16, pady=5)
-        ttk.Label(f, text="Background apps to suspend (one per line):", style="Card.TLabel").pack(anchor="w", padx=16, pady=(12, 2))
-        self.hogtext = tk.Text(f, height=8, bg="#232736", fg=FG, bd=0, insertbackground=FG, font=("Consolas", 9))
+            ttk.Checkbutton(f, text="  " + t, variable=v, command=self.save_opts).pack(anchor="w", padx=16, pady=6)
+        f2 = self.card(p)
+        f2.pack(fill="both", expand=True, pady=12)
+        tk.Label(f2, text="APPS TO SUSPEND WHILE GAMING (one per line)", bg=CARD, fg=MUTED,
+                 font=(FONT, 8, "bold")).pack(anchor="w", padx=16, pady=(12, 4))
+        self.hogtext = tk.Text(f2, height=7, bg=CARD2, fg=FG, bd=0, insertbackground=FG, font=("Consolas", 9),
+                               highlightthickness=0)
         self.hogtext.insert("1.0", "\n".join(self.cfg["hogs"]))
-        self.hogtext.pack(fill="x", padx=16)
-        ttk.Button(f, text="Save list", command=self.save_hogs).pack(anchor="e", padx=16, pady=8)
-        ttk.Label(f, text="🛡 Anti-cheat safe: ArenaBoost never reads, writes or injects into game memory. "
-                          "System & anti-cheat processes are protected.", style="Muted.TLabel").pack(anchor="w", padx=16)
-        ttk.Label(f, text=f"Config & logs: {APP_DIR}", style="Muted.TLabel").pack(anchor="w", padx=16, pady=4)
+        self.hogtext.pack(fill="both", expand=True, padx=16)
+        self.btn(f2, "Save list", self.save_hogs, "primary").pack(anchor="e", padx=16, pady=10)
 
     def save_opts(self):
         for k, v in self.vars.items():
@@ -896,17 +1135,70 @@ class App(tk.Tk):
         save_cfg(self.cfg)
         self.log(f"Saved {len(self.cfg['hogs'])} apps." + (f" Ignored protected: {bad}" if bad else ""))
 
+    # ---------------------------------------------------------------- about
+    def _about_page(self, p):
+        self.h1(p, "About")
+        c = self.card(p)
+        c.pack(fill="x")
+        tk.Label(c, text=f"⚡ {APP_NAME}", bg=CARD, fg=FG, font=(FONT, 22, "bold")).pack(anchor="w", padx=20, pady=(18, 0))
+        tk.Label(c, text=f"Version {APP_VERSION}", bg=CARD, fg=MUTED).pack(anchor="w", padx=20)
+        tk.Label(c, text=f"Created by {AUTHOR}", bg=CARD, fg=ACC, font=(FONT, 13, "bold")).pack(anchor="w", padx=20, pady=(10, 0))
+        tk.Label(c, text=f"© 2026 {AUTHOR}. Released under the MIT License.", bg=CARD, fg=MUTED).pack(anchor="w", padx=20)
+        tk.Label(c, text="🛡 Anti-cheat safe: never reads, writes or injects into game memory.\n"
+                         "♻ Crash-safe: every tweak is saved and restored automatically.\n"
+                         f"📁 Config & logs: {APP_DIR}",
+                 bg=CARD, fg=MUTED, justify="left").pack(anchor="w", padx=20, pady=(12, 18))
+
     def on_close(self):
         if self.engine.active:
             self.engine.restore()
         self.destroy()
 
 
+# ================================================================ SELF-TEST (real system)
+def selftest():
+    """Runs the REAL functions on this PC and prints PASS/FAIL. Use: ArenaBoost.exe --selftest"""
+    results = []
+    if sys.stdout is None:  # windowed .exe has no console -> write report to file
+        sys.stdout = open(os.path.join(APP_DIR, "selftest.txt"), "w", encoding="utf-8")
+
+    def check(name, fn):
+        try:
+            ok, info = fn()
+        except Exception as e:
+            ok, info = False, f"{type(e).__name__}: {e}"
+        results.append((name, ok, info))
+        print(f"[{'PASS' if ok else 'FAIL'}] {name} - {info}", flush=True)
+
+    admin = is_admin()
+    print(f"[INFO] Administrator rights - {'yes' if admin else 'no (service pause & RAM purge limited)'}", flush=True)
+    check("Game scan", lambda: (True, f"{len(scan_all())} games found"))
+    if IS_WIN:
+        def power():
+            old = WinTweaks.get_power_plan()
+            new = WinTweaks.set_best_power_plan()
+            now = WinTweaks.get_power_plan()
+            WinTweaks.set_power_plan(old)
+            back = WinTweaks.get_power_plan()
+            return (now and now.lower() == new.lower() and back == old, f"{old[:8]} → {now[:8]} → {back[:8]}")
+        check("Power plan switch + restore", power)
+        check("Timer resolution 0.5ms", lambda: (WinTweaks.set_timer(True) or WinTweaks.set_timer(False) or True, "set & released"))
+        if admin:
+            check("Standby RAM purge", lambda: (WinTweaks.purge_standby().startswith("OK"), WinTweaks.purge_standby()))
+    check("Ping (network)", lambda: ((r := tcp_ping("dynamodb.me-south-1.amazonaws.com", count=3)) is not None,
+                                     f"{r[0]:.0f} ms" if r else "unreachable"))
+    fails = [r for r in results if not r[1]]
+    print(f"\n{len(results) - len(fails)}/{len(results)} checks passed", flush=True)
+    return 1 if fails else 0
+
+
 def main():
+    if "--selftest" in sys.argv:
+        sys.exit(selftest())
     if IS_WIN and not is_admin() and "--no-admin" not in sys.argv:
         try:
             if relaunch_as_admin():
-                return  # elevated copy started; if UAC declined we continue without admin
+                return
         except Exception:
             pass
     if IS_WIN:

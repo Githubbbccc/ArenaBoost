@@ -6,7 +6,7 @@ on:
 
 jobs:
   windows:
-    name: Windows app – tests on real Windows + EXE
+    name: Windows – unit + REAL system tests (admin) + EXE
     runs-on: windows-latest
     defaults: { run: { working-directory: windows } }
     steps:
@@ -14,13 +14,23 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: '3.12' }
       - run: pip install psutil pytest pyinstaller
-      - run: python -m pytest -v
-      - run: python -m PyInstaller --noconfirm --onefile --windowed --uac-admin --name ArenaBoost arenaboost.py
+      - name: Unit tests
+        run: python -m pytest test_arenaboost.py -v
+      - name: REAL Windows tests (power plan, services, RAM purge, GUI, full Boost & Launch)
+        run: python -m pytest test_real_windows.py -v -s
+      - name: Build EXE
+        run: python -m PyInstaller --noconfirm --onefile --windowed --uac-admin --name ArenaBoost arenaboost.py
+      - name: Self-test the built EXE
+        shell: pwsh
+        run: |
+          Start-Process -FilePath dist\ArenaBoost.exe -ArgumentList "--selftest" -Wait
+          $r = Get-Content "$env:APPDATA\ArenaBoost\selftest.txt"; $r
+          if (-not ($r -match "checks passed") -or ($r -match "\[FAIL\]")) { exit 1 }
       - uses: actions/upload-artifact@v4
         with: { name: ArenaBoost-Windows, path: windows/dist/ArenaBoost.exe }
 
-  android:
-    name: Mobile app – tests + APK
+  mobile:
+    name: Mobile – analyze + widget tests + APK
     runs-on: ubuntu-latest
     defaults: { run: { working-directory: mobile } }
     steps:
@@ -35,6 +45,33 @@ jobs:
       - run: flutter build apk --release
       - uses: actions/upload-artifact@v4
         with: { name: ArenaBoost-Android, path: mobile/build/app/outputs/flutter-apk/app-release.apk }
+
+  android-device:
+    name: Android – REAL device test on emulator (API 34)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: '17' }
+      - uses: subosito/flutter-action@v2
+        with: { channel: stable, cache: true }
+      - run: flutter pub get
+        working-directory: mobile
+      - name: Run integration tests on emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim
+          working-directory: mobile
+          script: flutter test integration_test -d emulator-5554 --reporter expanded
 
   ios:
     name: iOS – compile check (no signing)

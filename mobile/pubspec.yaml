@@ -1,7 +1,7 @@
 name: arenaboost
-description: ArenaBoost - Safe Game Launcher & Booster for Android and iOS
+description: ArenaBoost - Safe Game Launcher & Booster for Android and iOS. Created by Ghost.
 publish_to: 'none'
-version: 1.0.0+1
+version: 2.0.0+2
 
 environment:
   sdk: '>=3.3.0 <4.0.0'
@@ -14,6 +14,8 @@ dependencies:
 
 dev_dependencies:
   flutter_test:
+    sdk: flutter
+  integration_test:
     sdk: flutter
   flutter_lints: ^4.0.0
 

@@ -1,33 +1,63 @@
-// ArenaBoost Mobile - Safe Game Launcher & Booster (Android + iOS)
-// Android: real boost (background kill, DND, thermal, RAM) via MethodChannel.
+// ArenaBoost Mobile v2 - Safe Game Launcher & Booster (Android + iOS)
+// Created by Ghost - Copyright (c) 2026 Ghost - MIT License
+//
+// Android: real boost (background clean, DND, rotation lock, thermal, RAM) via MethodChannel.
 // iOS: Apple blocks boosting -> launcher + ping test + checklist.
 import 'dart:async';
 import 'dart:io';
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 
-const bg = Color(0xFF0F1117), card = Color(0xFF1A1D27), acc = Color(0xFF7C5CFF);
-const good = Color(0xFF3DDC97), warn = Color(0xFFFFB84D), bad = Color(0xFFFF5C7A), muted = Color(0xFF8A8FA3);
+const appName = 'ArenaBoost', appVersion = '2.0.0', author = 'Ghost';
+
+// ---------------------------------------------------------------- design tokens
+const bg = Color(0xFF0B0D14), surface = Color(0xFF161A26), surface2 = Color(0xFF1E2333);
+const acc = Color(0xFF8B5CF6), acc2 = Color(0xFF22D3EE);
+const good = Color(0xFF34D399), warn = Color(0xFFFBBF24), bad = Color(0xFFF87171), muted = Color(0xFF8A90A6);
+const gradient = LinearGradient(colors: [acc, acc2], begin: Alignment.topLeft, end: Alignment.bottomRight);
+
 const native = MethodChannel('arenaboost/native');
 
 /// Overridable in tests.
 bool Function() isAndroidPlatform = () => Platform.isAndroid;
 
-void main() => runApp(const ArenaBoostApp());
+// ---------------------------------------------------------------- orientation
+/// Launcher screen orientation. Default = portrait (vertical).
+const appOrientations = {
+  'portrait': [DeviceOrientation.portraitUp],
+  'landscape': [DeviceOrientation.landscapeLeft, DeviceOrientation.landscapeRight],
+  'auto': <DeviceOrientation>[],
+};
+
+Future<void> applyAppOrientation(String mode) =>
+    SystemChrome.setPreferredOrientations(appOrientations[mode] ?? appOrientations['portrait']!);
+
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  final sp = await SharedPreferences.getInstance();
+  await applyAppOrientation(sp.getString('appOrientation') ?? 'portrait');
+  SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
+      statusBarColor: Colors.transparent, systemNavigationBarColor: bg));
+  runApp(const ArenaBoostApp());
+}
 
 class ArenaBoostApp extends StatelessWidget {
   const ArenaBoostApp({super.key});
   @override
   Widget build(BuildContext context) => MaterialApp(
-        title: 'ArenaBoost',
+        title: appName,
         debugShowCheckedModeBanner: false,
         theme: ThemeData(
           brightness: Brightness.dark,
           scaffoldBackgroundColor: bg,
-          colorScheme: const ColorScheme.dark(primary: acc, surface: card),
-          cardTheme: CardThemeData(color: card, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16))),
+          colorScheme: const ColorScheme.dark(primary: acc, secondary: acc2, surface: surface),
+          cardTheme: CardThemeData(
+              color: surface, elevation: 0, margin: const EdgeInsets.symmetric(vertical: 6),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20),
+                  side: const BorderSide(color: Color(0xFF232A3D)))),
           useMaterial3: true,
         ),
         home: const Home(),
@@ -60,21 +90,24 @@ const pingTargets = {
 String mb(num b) => '${(b / 1048576).toStringAsFixed(0)} MB';
 String gb(num b) => '${(b / 1073741824).toStringAsFixed(1)} GB';
 
-// ================================================================ HOME
+// ================================================================ HOME SHELL
 class Home extends StatefulWidget {
   const Home({super.key});
   @override
   State<Home> createState() => _HomeState();
 }
 
-class _HomeState extends State<Home> with WidgetsBindingObserver {
+class _HomeState extends State<Home> with WidgetsBindingObserver, SingleTickerProviderStateMixin {
   int tab = 0;
   List<GameApp> apps = [];
   Set<String> myGames = {};
   bool loading = true, showAll = false, boosting = false, boostedSession = false;
+  String query = '', appOrientation = 'portrait', gameRotation = 'off';
   Map mem = {}, dev = {};
   final logs = <String>[];
   Timer? timer;
+  late final AnimationController pulse =
+      AnimationController(vsync: this, duration: const Duration(seconds: 2))..repeat(reverse: true);
   bool get isAndroid => isAndroidPlatform();
 
   @override
@@ -88,25 +121,35 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     timer?.cancel();
+    pulse.dispose();
     super.dispose();
   }
 
-  // Auto-restore when the user comes back from the game
+  /// Auto-restore when the user comes back from the game.
   @override
   void didChangeAppLifecycleState(AppLifecycleState s) {
     if (s == AppLifecycleState.resumed && boostedSession) {
       boostedSession = false;
-      if (isAndroid) native.invokeMethod('setDnd', {'on': false});
-      log('✅ Welcome back - Do Not Disturb restored');
+      if (isAndroid) {
+        native.invokeMethod('setDnd', {'on': false});
+        if (gameRotation != 'off') native.invokeMethod('lockRotation', {'mode': 'off'});
+      }
+      log('✅ Welcome back - notifications & rotation restored');
       _refreshStats();
     }
   }
 
-  void log(String m) => setState(() => logs.insert(0, '${TimeOfDay.now().format(context)}  $m'));
+  void log(String m) {
+    if (!mounted) return;
+    final t = TimeOfDay.now();
+    setState(() => logs.insert(0, '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}  $m'));
+  }
 
   Future<void> _init() async {
     final sp = await SharedPreferences.getInstance();
     myGames = (sp.getStringList('myGames') ?? []).toSet();
+    appOrientation = sp.getString('appOrientation') ?? 'portrait';
+    gameRotation = sp.getString('gameRotation') ?? 'off';
     await _loadApps();
     await _refreshStats();
     timer = Timer.periodic(const Duration(seconds: 3), (_) => _refreshStats());
@@ -116,9 +159,14 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
     setState(() => loading = true);
     final out = <GameApp>[];
     if (isAndroid) {
-      final list = await native.invokeListMethod<Map>('getApps') ?? [];
-      for (final m in list) {
-        out.add(GameApp(m['pkg'], m['name'], m['icon'] as Uint8List?, m['isGame'] == true || myGames.contains(m['pkg'])));
+      try {
+        final list = await native.invokeListMethod<Map>('getApps') ?? [];
+        for (final m in list) {
+          out.add(GameApp(m['pkg'], m['name'], m['icon'] as Uint8List?,
+              m['isGame'] == true || myGames.contains(m['pkg'])));
+        }
+      } catch (e) {
+        log('❌ Could not read apps: $e');
       }
     } else {
       for (final e in iosGames.entries) {
@@ -129,6 +177,7 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
         if (ok) out.add(GameApp(e.value, e.key, null, true));
       }
     }
+    if (!mounted) return;
     setState(() {
       apps = out;
       loading = false;
@@ -150,6 +199,32 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
     (await SharedPreferences.getInstance()).setStringList('myGames', myGames.toList());
   }
 
+  Future<void> setAppOrientation(String m) async {
+    setState(() => appOrientation = m);
+    (await SharedPreferences.getInstance()).setString('appOrientation', m);
+    await applyAppOrientation(m);
+    log('📱 Launcher orientation: $m');
+  }
+
+  Future<void> setGameRotation(String m) async {
+    if (m != 'off' && isAndroid && await native.invokeMethod<bool>('canWriteSettings') != true) {
+      log('🔓 Allow "Modify system settings" for ArenaBoost, then choose again');
+      await native.invokeMethod('requestWriteSettings');
+      return;
+    }
+    setState(() => gameRotation = m);
+    (await SharedPreferences.getInstance()).setString('gameRotation', m);
+  }
+
+  // ---------------- quick boost (no launch)
+  Future<Map?> quickClean() async {
+    if (!isAndroid) return null;
+    final r = await native.invokeMapMethod('boost', {'keep': <String>[]});
+    log('🧹 Cleaned ${r?['killed']} apps, freed ~${mb(r?['freed'] ?? 0)}');
+    _refreshStats();
+    return r;
+  }
+
   // ---------------- BOOST & LAUNCH
   Future<void> boostAndLaunch(GameApp g) async {
     if (!isAndroid) {
@@ -157,125 +232,264 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
       return;
     }
     setState(() => boosting = true);
-    log('🚀 Boosting for ${g.name}…');
-    // 1. Thermal / battery checks
-    await _refreshStats();
-    if ((dev['batteryTemp'] ?? 0) > 42) log('🌡 Phone is hot (${dev['batteryTemp']}°C) - performance will throttle. Remove case / cool down.');
-    if (dev['powerSave'] == true) log('🔋 Battery Saver is ON - it limits CPU/GPU. Turn it off for gaming.');
-    if (dev['network'] == 'Mobile data') log('📶 On mobile data - 4G ping varies; Wi-Fi 5GHz is usually more stable.');
-    // 2. Kill background apps (all except game)
-    final r = await native.invokeMapMethod('boost', {'keep': [g.id]});
-    log('🧹 Cleared background of ${r?['killed']} apps, freed ~${mb(r?['freed'] ?? 0)}');
-    // 3. DND
-    final dnd = await native.invokeMethod<bool>('setDnd', {'on': true});
-    log(dnd == true ? '🔕 Do Not Disturb ON (calls from starred contacts still allowed)' : '🔔 DND skipped - grant access in Tools tab');
-    await Future.delayed(const Duration(milliseconds: 400));
-    setState(() => boosting = false);
-    boostedSession = true;
-    await native.invokeMethod('launch', {'pkg': g.id});
-    log('🎮 Launched ${g.name}. Settings restore when you come back.');
+    try {
+      log('🚀 Boosting for ${g.name}…');
+      await _refreshStats();
+      if ((dev['batteryTemp'] ?? 0) > 42) {
+        log('🌡 Phone is hot (${dev['batteryTemp']}°C) - performance will throttle. Remove case / cool down.');
+      }
+      if (dev['powerSave'] == true) log('🔋 Battery Saver is ON - it limits CPU/GPU. Turn it off for gaming.');
+      if (dev['network'] == 'Mobile data') log('📶 On mobile data - 4G ping varies; Wi-Fi 5GHz is usually more stable.');
+      final r = await native.invokeMapMethod('boost', {'keep': [g.id]});
+      log('🧹 Cleared background of ${r?['killed']} apps, freed ~${mb(r?['freed'] ?? 0)}');
+      final dnd = await native.invokeMethod<bool>('setDnd', {'on': true});
+      log(dnd == true ? '🔕 Do Not Disturb ON (starred contacts can still call)' : '🔔 DND skipped - allow it in Settings');
+      if (gameRotation != 'off') {
+        final ok = await native.invokeMethod<bool>('lockRotation', {'mode': gameRotation});
+        log(ok == true ? '🔒 Screen rotation locked: $gameRotation' : '🔓 Rotation lock needs permission (Settings)');
+      }
+      await Future.delayed(const Duration(milliseconds: 400));
+      boostedSession = true;
+      final launched = await native.invokeMethod<bool>('launch', {'pkg': g.id});
+      log(launched == true ? '🎮 Launched ${g.name}. Settings restore when you come back.' : '❌ Could not open ${g.name}');
+    } catch (e) {
+      log('❌ Boost error: $e');
+    } finally {
+      if (mounted) setState(() => boosting = false);
+    }
   }
 
   // ================================================================ UI
   @override
   Widget build(BuildContext context) {
-    final pages = [_gamesPage(), _monitorPage(), const NetworkPage(), _toolsPage()];
+    final pages = [
+      _homePage(),
+      _gamesPage(),
+      const NetworkPage(),
+      _monitorPage(),
+      _settingsPage(),
+    ];
     return Scaffold(
-      appBar: AppBar(
-        backgroundColor: bg,
-        title: const Text('⚡ ArenaBoost', style: TextStyle(fontWeight: FontWeight.bold)),
-        actions: [IconButton(onPressed: _loadApps, icon: const Icon(Icons.refresh))],
+      body: SafeArea(
+        child: Stack(children: [
+          AnimatedSwitcher(duration: const Duration(milliseconds: 220), child: KeyedSubtree(key: ValueKey(tab), child: pages[tab])),
+          if (boosting)
+            Container(
+              color: Colors.black87,
+              child: const Center(
+                child: Column(mainAxisSize: MainAxisSize.min, children: [
+                  SizedBox(width: 120, height: 120, child: CircularProgressIndicator(strokeWidth: 6, color: acc2)),
+                  SizedBox(height: 22),
+                  Text('Boosting…', style: TextStyle(fontSize: 22, fontWeight: FontWeight.w800)),
+                  Text('Cleaning background • DND • Rotation', style: TextStyle(color: muted)),
+                ]),
+              ),
+            ),
+        ]),
       ),
-      body: Stack(children: [
-        pages[tab],
-        if (boosting)
-          Container(
-            color: Colors.black54,
-            child: const Center(child: Column(mainAxisSize: MainAxisSize.min, children: [
-              CircularProgressIndicator(color: acc), SizedBox(height: 16),
-              Text('Boosting…', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-            ])),
-          ),
-      ]),
       bottomNavigationBar: NavigationBar(
-        backgroundColor: card,
+        backgroundColor: surface,
+        indicatorColor: acc.withValues(alpha: .25),
         selectedIndex: tab,
         onDestinationSelected: (i) => setState(() => tab = i),
         destinations: const [
-          NavigationDestination(icon: Icon(Icons.sports_esports), label: 'Games'),
-          NavigationDestination(icon: Icon(Icons.speed), label: 'Monitor'),
+          NavigationDestination(icon: Icon(Icons.bolt_outlined), selectedIcon: Icon(Icons.bolt), label: 'Boost'),
+          NavigationDestination(icon: Icon(Icons.sports_esports_outlined), selectedIcon: Icon(Icons.sports_esports), label: 'Games'),
           NavigationDestination(icon: Icon(Icons.wifi), label: 'Network'),
-          NavigationDestination(icon: Icon(Icons.tune), label: 'Tools'),
+          NavigationDestination(icon: Icon(Icons.speed), label: 'Monitor'),
+          NavigationDestination(icon: Icon(Icons.tune), label: 'Settings'),
         ],
       ),
     );
   }
 
-  Widget _gamesPage() {
-    if (loading) return const Center(child: CircularProgressIndicator());
-    final list = showAll ? apps : apps.where((a) => a.isGame).toList();
-    return ListView(padding: const EdgeInsets.all(12), children: [
+  // ---------------- HOME / BOOST
+  Widget _homePage() {
+    final total = (mem['total'] ?? 0) as num, avail = (mem['avail'] ?? 0) as num;
+    final used = total > 0 ? 1 - avail / total : 0.0;
+    final games = apps.where((a) => a.isGame).toList();
+    return ListView(padding: const EdgeInsets.fromLTRB(18, 12, 18, 18), children: [
+      Row(children: [
+        Expanded(
+          child: Align(
+            alignment: Alignment.centerLeft,
+            child: FittedBox(
+              child: ShaderMask(
+                shaderCallback: (r) => gradient.createShader(r),
+                child: const Text('⚡ $appName', style: TextStyle(fontSize: 26, fontWeight: FontWeight.w900, color: Colors.white)),
+              ),
+            ),
+          ),
+        ),
+        IconButton(tooltip: 'Refresh', onPressed: _loadApps, icon: const Icon(Icons.refresh, color: muted)),
+      ]),
+      const Text('Created by $author', style: TextStyle(color: muted, fontSize: 12)),
+      const SizedBox(height: 18),
       if (!isAndroid)
         _note('iPhone note: Apple does not allow any app to close other apps, free RAM or change performance. '
-            'ArenaBoost on iOS = launcher + ping test + checklist (Tools tab).'),
+            'On iOS, ArenaBoost is a launcher + ping test + checklist.'),
+      Center(
+        child: GestureDetector(
+          key: const Key('boostOrb'),
+          onTap: isAndroid ? quickClean : () => setState(() => tab = 2),
+          child: AnimatedBuilder(
+            animation: pulse,
+            builder: (_, __) => CustomPaint(
+              painter: _OrbPainter(used.toDouble(), pulse.value),
+              child: SizedBox(
+                width: 230, height: 230,
+                child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+                  const Icon(Icons.bolt, size: 44, color: Colors.white),
+                  Text(isAndroid ? 'BOOST' : 'PING TEST',
+                      style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w900, letterSpacing: 2)),
+                  if (isAndroid)
+                    Text('RAM ${(used * 100).toStringAsFixed(0)}% used', style: const TextStyle(color: Colors.white70)),
+                ]),
+              ),
+            ),
+          ),
+        ),
+      ),
+      const SizedBox(height: 18),
+      if (isAndroid)
+        Row(children: [
+          _chip(Icons.thermostat, '${((dev['batteryTemp'] ?? 0) as num).toStringAsFixed(0)}°C',
+              ((dev['batteryTemp'] ?? 0) as num) > 42 ? bad : good),
+          _chip(Icons.battery_std, '${dev['battery'] ?? '-'}%', dev['powerSave'] == true ? warn : good),
+          _chip(dev['network'] == 'Wi-Fi' ? Icons.wifi : Icons.signal_cellular_alt, '${dev['network'] ?? '-'}', acc2),
+        ]),
+      const SizedBox(height: 18),
+      Row(children: [
+        const Expanded(
+            child: Text('Quick launch', overflow: TextOverflow.ellipsis,
+                style: TextStyle(fontSize: 17, fontWeight: FontWeight.w800))),
+        TextButton(onPressed: () => setState(() => tab = 1), child: const Text('All games ›')),
+      ]),
+      SizedBox(
+        height: 118,
+        child: loading
+            ? const Center(child: CircularProgressIndicator())
+            : games.isEmpty
+                ? _note(isAndroid ? 'No games yet — open Games and tap ☆ to add.' : 'No supported games found.')
+                : ListView.separated(
+                    scrollDirection: Axis.horizontal,
+                    itemCount: games.length,
+                    separatorBuilder: (_, __) => const SizedBox(width: 12),
+                    itemBuilder: (_, i) => _gameTile(games[i], compact: true),
+                  ),
+      ),
+      const SizedBox(height: 10),
+      _logCard(),
+    ]);
+  }
+
+  Widget _chip(IconData i, String t, Color c) => Expanded(
+        child: Container(
+          margin: const EdgeInsets.symmetric(horizontal: 4),
+          padding: const EdgeInsets.symmetric(vertical: 12),
+          decoration: BoxDecoration(color: surface, borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: const Color(0xFF232A3D))),
+          child: Column(children: [
+            Icon(i, color: c, size: 20),
+            const SizedBox(height: 4),
+            Text(t, style: const TextStyle(fontWeight: FontWeight.w700), overflow: TextOverflow.ellipsis),
+          ]),
+        ),
+      );
+
+  Widget _gameTile(GameApp a, {bool compact = false}) => InkWell(
+        borderRadius: BorderRadius.circular(20),
+        onTap: () => boostAndLaunch(a),
+        onLongPress: isAndroid ? () => _toggleGame(a) : null,
+        child: Container(
+          width: compact ? 92 : null,
+          decoration: BoxDecoration(color: surface, borderRadius: BorderRadius.circular(20),
+              border: Border.all(color: const Color(0xFF232A3D))),
+          child: Stack(children: [
+            Padding(
+              padding: const EdgeInsets.all(10),
+              child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+                Container(
+                  decoration: BoxDecoration(borderRadius: BorderRadius.circular(16),
+                      boxShadow: [BoxShadow(color: acc.withValues(alpha: .35), blurRadius: 14)]),
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(16),
+                    child: a.icon != null
+                        ? Image.memory(a.icon!, width: compact ? 48 : 58, height: compact ? 48 : 58)
+                        : Container(width: compact ? 48 : 58, height: compact ? 48 : 58,
+                            decoration: const BoxDecoration(gradient: gradient),
+                            child: const Icon(Icons.sports_esports, color: Colors.white)),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Text(a.name, maxLines: compact ? 1 : 2, textAlign: TextAlign.center, overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
+                if (!compact) ...[
+                  const SizedBox(height: 4),
+                  const Text('🚀 Boost', style: TextStyle(fontSize: 11, color: acc2, fontWeight: FontWeight.w800)),
+                ],
+              ]),
+            ),
+            if (isAndroid && !compact)
+              Positioned(
+                right: 0, top: 0,
+                child: IconButton(
+                  iconSize: 18,
+                  icon: Icon(a.isGame ? Icons.star : Icons.star_border, color: a.isGame ? warn : muted),
+                  onPressed: () => _toggleGame(a),
+                ),
+              ),
+          ]),
+        ),
+      );
+
+  // ---------------- GAMES
+  Widget _gamesPage() {
+    if (loading) return const Center(child: CircularProgressIndicator());
+    var list = showAll ? apps : apps.where((a) => a.isGame).toList();
+    if (query.isNotEmpty) list = list.where((a) => a.name.toLowerCase().contains(query.toLowerCase())).toList();
+    return ListView(padding: const EdgeInsets.fromLTRB(18, 12, 18, 18), children: [
+      _title('Games', 'Tap to Boost & Launch · ☆ to add or remove'),
+      TextField(
+        key: const Key('search'),
+        onChanged: (v) => setState(() => query = v),
+        decoration: InputDecoration(
+          hintText: 'Search',
+          prefixIcon: const Icon(Icons.search, color: muted),
+          filled: true, fillColor: surface,
+          border: OutlineInputBorder(borderRadius: BorderRadius.circular(16), borderSide: BorderSide.none),
+        ),
+      ),
+      const SizedBox(height: 8),
       Row(children: [
         Expanded(
           child: Text(showAll ? 'All apps (tap ☆ to mark as game)' : 'My games (${list.length})',
               overflow: TextOverflow.ellipsis, style: const TextStyle(color: muted)),
         ),
-        if (isAndroid) TextButton(onPressed: () => setState(() => showAll = !showAll), child: Text(showAll ? 'Games only' : 'Show all apps')),
+        if (isAndroid)
+          TextButton(onPressed: () => setState(() => showAll = !showAll), child: Text(showAll ? 'Games only' : 'Show all apps')),
       ]),
-      if (list.isEmpty) _note(isAndroid ? 'No games detected. Tap "Show all apps" and star your games.' : 'No supported games found on this iPhone.'),
-      GridView.count(
+      if (list.isEmpty)
+        _note(isAndroid ? 'No games detected. Tap "Show all apps" and star your games.' : 'No supported games found on this iPhone.'),
+      GridView.extent(
         shrinkWrap: true,
         physics: const NeverScrollableScrollPhysics(),
-        crossAxisCount: 3,
-        childAspectRatio: 0.78,
-        mainAxisSpacing: 10,
-        crossAxisSpacing: 10,
-        children: list.map((a) => InkWell(
-              borderRadius: BorderRadius.circular(16),
-              onTap: () => boostAndLaunch(a),
-              onLongPress: isAndroid ? () => _toggleGame(a) : null,
-              child: Card(
-                child: Stack(children: [
-                  Padding(
-                    padding: const EdgeInsets.all(10),
-                    child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-                      ClipRRect(
-                        borderRadius: BorderRadius.circular(14),
-                        child: a.icon != null
-                            ? Image.memory(a.icon!, width: 56, height: 56)
-                            : Container(width: 56, height: 56, color: acc, child: const Icon(Icons.sports_esports)),
-                      ),
-                      const SizedBox(height: 8),
-                      Text(a.name, maxLines: 2, textAlign: TextAlign.center, overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(fontSize: 12)),
-                      const SizedBox(height: 4),
-                      const Text('🚀 Boost', style: TextStyle(fontSize: 11, color: acc, fontWeight: FontWeight.bold)),
-                    ]),
-                  ),
-                  if (isAndroid)
-                    Positioned(
-                      right: 0, top: 0,
-                      child: IconButton(
-                        iconSize: 18,
-                        icon: Icon(a.isGame ? Icons.star : Icons.star_border, color: a.isGame ? warn : muted),
-                        onPressed: () => _toggleGame(a),
-                      ),
-                    ),
-                ]),
-              ),
-            )).toList(),
+        maxCrossAxisExtent: 130,
+        childAspectRatio: 0.72,
+        mainAxisSpacing: 12,
+        crossAxisSpacing: 12,
+        children: list.map((a) => _gameTile(a)).toList(),
       ),
       const SizedBox(height: 12),
       _logCard(),
     ]);
   }
 
+  // ---------------- MONITOR
   Widget _monitorPage() {
     if (!isAndroid) {
-      return ListView(padding: const EdgeInsets.all(12), children: [
+      return ListView(padding: const EdgeInsets.all(18), children: [
+        _title('Monitor', null),
         _note('iOS does not expose RAM, CPU or temperature to apps. Check: Settings › Battery › Battery Health, '
             'and Settings › General › iPhone Storage (keep 10%+ free).'),
       ]);
@@ -284,126 +498,237 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
     final used = 1 - avail / total;
     final temp = (dev['batteryTemp'] ?? 0) as num;
     final sFree = (dev['storageFree'] ?? 0) as num, sTot = (dev['storageTotal'] ?? 1) as num;
-    return ListView(padding: const EdgeInsets.all(12), children: [
-      _stat('RAM', '${(used * 100).toStringAsFixed(0)}%', '${gb(total - avail)} / ${gb(total)} used', used,
-          used > .85 ? bad : used > .7 ? warn : good),
+    return ListView(padding: const EdgeInsets.fromLTRB(18, 12, 18, 18), children: [
+      _title('Monitor', '${dev['model'] ?? ''} · ${dev['android'] ?? ''}'),
+      _stat('RAM', '${(used * 100).toStringAsFixed(0)}%', '${gb(total - avail)} / ${gb(total)} used', used.toDouble(),
+          used > .85 ? bad : used > .7 ? warn : good, Icons.memory),
       _stat('Temperature', '${temp.toStringAsFixed(1)}°C', dev['thermal'] ?? '', (temp / 50).clamp(0, 1).toDouble(),
-          temp > 42 ? bad : temp > 38 ? warn : good),
+          temp > 42 ? bad : temp > 38 ? warn : good, Icons.thermostat),
       _stat('Battery', '${dev['battery'] ?? '-'}%',
           '${dev['charging'] == true ? '⚡ Charging (adds heat while gaming)' : 'On battery'}${dev['powerSave'] == true ? ' • Battery Saver ON ⚠' : ''}',
-          ((dev['battery'] ?? 0) as num) / 100, dev['powerSave'] == true ? warn : good),
+          ((dev['battery'] ?? 0) as num) / 100, dev['powerSave'] == true ? warn : good, Icons.battery_std),
       _stat('Storage free', gb(sFree), sFree / sTot < .1 ? 'Under 10% free - causes lag!' : 'OK', 1 - sFree / sTot,
-          sFree / sTot < .1 ? bad : good),
-      Card(child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Text('${dev['model'] ?? ''}', style: const TextStyle(fontWeight: FontWeight.bold)),
-          Text('${dev['android'] ?? ''}', style: const TextStyle(color: muted)),
-          Text('Chip: ${dev['cpu'] ?? ''} • ${dev['cores'] ?? ''} cores • Screen ${dev['refresh'] ?? ''} Hz • ${dev['network'] ?? ''}',
-              style: const TextStyle(color: muted)),
-        ]),
+          sFree / sTot < .1 ? bad : good, Icons.sd_storage),
+      Card(child: ListTile(
+        leading: const Icon(Icons.developer_board, color: acc2),
+        title: Text('Chip: ${dev['cpu'] ?? ''} · ${dev['cores'] ?? ''} cores'),
+        subtitle: Text('Screen ${dev['refresh'] ?? ''} Hz · ${dev['network'] ?? ''}', style: const TextStyle(color: muted)),
       )),
       const SizedBox(height: 8),
-      FilledButton.icon(
-        style: FilledButton.styleFrom(backgroundColor: acc, padding: const EdgeInsets.all(16)),
-        onPressed: () async {
-          final r = await native.invokeMapMethod('boost', {'keep': <String>[]});
-          log('🧹 Cleaned ${r?['killed']} apps, freed ~${mb(r?['freed'] ?? 0)}');
-          _refreshStats();
-          if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Freed ~${mb(r?['freed'] ?? 0)}')));
-        },
-        icon: const Icon(Icons.cleaning_services),
-        label: const Text('Clean background apps now'),
-      ),
+      _gradientButton(Icons.cleaning_services, 'Clean background apps now', () async {
+        final r = await quickClean();
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Freed ~${mb(r?['freed'] ?? 0)}')));
+        }
+      }),
     ]);
   }
 
-  Widget _toolsPage() => ListView(padding: const EdgeInsets.all(12), children: [
+  // ---------------- SETTINGS
+  Widget _settingsPage() => ListView(padding: const EdgeInsets.fromLTRB(18, 12, 18, 18), children: [
+        _title('Settings', null),
+        _section('SCREEN ORIENTATION'),
+        Card(
+          child: Padding(
+            padding: const EdgeInsets.all(14),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              const Text('ArenaBoost screen', style: TextStyle(fontWeight: FontWeight.w700)),
+              const SizedBox(height: 8),
+              SegmentedButton<String>(
+                key: const Key('appOrientation'),
+                segments: const [
+                  ButtonSegment(value: 'portrait', label: Text('Vertical'), icon: Icon(Icons.stay_current_portrait)),
+                  ButtonSegment(value: 'landscape', label: Text('Horizontal'), icon: Icon(Icons.stay_current_landscape)),
+                  ButtonSegment(value: 'auto', label: Text('Auto'), icon: Icon(Icons.screen_rotation)),
+                ],
+                selected: {appOrientation},
+                onSelectionChanged: (s) => setAppOrientation(s.first),
+              ),
+              if (isAndroid) ...[
+                const SizedBox(height: 16),
+                const Text('Lock rotation while gaming', style: TextStyle(fontWeight: FontWeight.w700)),
+                const Text('Stops the screen flipping by accident mid-match. Restored when you return.',
+                    style: TextStyle(color: muted, fontSize: 12)),
+                const SizedBox(height: 8),
+                SegmentedButton<String>(
+                  key: const Key('gameRotation'),
+                  segments: const [
+                    ButtonSegment(value: 'off', label: Text('Game decides')),
+                    ButtonSegment(value: 'portrait', label: Text('Vertical')),
+                    ButtonSegment(value: 'landscape', label: Text('Horizontal')),
+                  ],
+                  selected: {gameRotation},
+                  onSelectionChanged: (s) => setGameRotation(s.first),
+                ),
+                const SizedBox(height: 6),
+                const Text('Note: games that force their own orientation (e.g. PUBG = horizontal) always win.',
+                    style: TextStyle(color: muted, fontSize: 11)),
+              ],
+            ]),
+          ),
+        ),
         if (isAndroid) ...[
-          _tool(Icons.do_not_disturb_on, 'Allow Do Not Disturb control', 'Needed to block notifications during matches',
+          _section('PERMISSIONS & SYSTEM'),
+          _tool(Icons.do_not_disturb_on, 'Allow Do Not Disturb control', 'Blocks notifications during matches',
               () => native.invokeMethod('requestDndAccess')),
-          _tool(Icons.battery_charging_full, 'Battery optimization', 'Set games to "Unrestricted"',
+          _tool(Icons.screen_lock_rotation, 'Allow rotation lock', '"Modify system settings" permission',
+              () => native.invokeMethod('requestWriteSettings')),
+          _tool(Icons.battery_charging_full, 'Battery optimization', 'Set your games to "Unrestricted"',
               () => native.invokeMethod('openBatteryOpt')),
-          _tool(Icons.developer_mode, 'Developer options',
-              'Set Window/Transition/Animator scale to 0.5x or off for snappier UI', () => native.invokeMethod('openDevOptions')),
+          _tool(Icons.developer_mode, 'Developer options', 'Animation scales to 0.5x for a snappier phone',
+              () => native.invokeMethod('openDevOptions')),
         ],
-        const SizedBox(height: 8),
-        Card(child: Padding(
-          padding: const EdgeInsets.all(16),
-          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            const Text('✅ Pro gaming checklist', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-            const SizedBox(height: 8),
-            ...(isAndroid ? androidTips : iosTips).map((t) => Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 4),
-                  child: Text('• $t', style: const TextStyle(color: muted)),
-                )),
-          ]),
-        )),
-        _note('🛡 Safe: ArenaBoost never modifies game files or memory - no ban risk with PUBG, Free Fire, CODM anti-cheat.'),
+        _section('PRO CHECKLIST'),
+        Card(
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              ...(isAndroid ? androidTips : iosTips).map((t) => Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 4),
+                    child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                      const Icon(Icons.check_circle, color: good, size: 16),
+                      const SizedBox(width: 8),
+                      Expanded(child: Text(t, style: const TextStyle(color: muted))),
+                    ]),
+                  )),
+            ]),
+          ),
+        ),
+        _section('ABOUT'),
+        Card(
+          child: Padding(
+            padding: const EdgeInsets.all(18),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              ShaderMask(
+                shaderCallback: (r) => gradient.createShader(r),
+                child: const Text('⚡ $appName', style: TextStyle(fontSize: 22, fontWeight: FontWeight.w900, color: Colors.white)),
+              ),
+              const Text('Version $appVersion', style: TextStyle(color: muted)),
+              const SizedBox(height: 8),
+              const Text('Created by $author', style: TextStyle(color: acc, fontWeight: FontWeight.w800, fontSize: 16)),
+              const Text('© 2026 $author · MIT License', style: TextStyle(color: muted)),
+              const SizedBox(height: 8),
+              const Text('🛡 Anti-cheat safe: never modifies game files or memory — no ban risk.',
+                  style: TextStyle(color: muted, fontSize: 12)),
+            ]),
+          ),
+        ),
       ]);
 
-  // ---------- widgets
-  Widget _stat(String t, String v, String sub, double pct, Color c) => Card(
+  // ---------------- shared widgets
+  Widget _title(String t, String? sub) => Padding(
+        padding: const EdgeInsets.only(bottom: 14),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text(t, style: const TextStyle(fontSize: 26, fontWeight: FontWeight.w900)),
+          if (sub != null) Text(sub, style: const TextStyle(color: muted)),
+        ]),
+      );
+
+  Widget _section(String t) => Padding(
+      padding: const EdgeInsets.fromLTRB(4, 16, 4, 6),
+      child: Text(t, style: const TextStyle(color: muted, fontSize: 11, fontWeight: FontWeight.w800, letterSpacing: 1.2)));
+
+  Widget _stat(String t, String v, String sub, double pct, Color c, IconData icon) => Card(
         child: Padding(
           padding: const EdgeInsets.all(16),
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             Row(children: [
-              Text(t, style: const TextStyle(color: muted)),
-              const Spacer(),
-              Text(v, style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: c)),
+              Icon(icon, color: c, size: 20),
+              const SizedBox(width: 8),
+              Expanded(child: Text(t, overflow: TextOverflow.ellipsis, style: const TextStyle(color: muted))),
+              Text(v, style: TextStyle(fontSize: 22, fontWeight: FontWeight.w900, color: c)),
             ]),
-            const SizedBox(height: 8),
-            LinearProgressIndicator(value: pct.clamp(0, 1), color: c, backgroundColor: const Color(0xFF232736), minHeight: 6,
-                borderRadius: BorderRadius.circular(4)),
+            const SizedBox(height: 10),
+            LinearProgressIndicator(value: pct.clamp(0, 1), color: c, backgroundColor: surface2, minHeight: 8,
+                borderRadius: BorderRadius.circular(6)),
             const SizedBox(height: 6),
             Text(sub, style: const TextStyle(color: muted, fontSize: 12)),
           ]),
         ),
       );
 
-  Widget _tool(IconData i, String t, String s, VoidCallback f) =>
-      Card(child: ListTile(leading: Icon(i, color: acc), title: Text(t), subtitle: Text(s, style: const TextStyle(color: muted)),
+  Widget _gradientButton(IconData i, String t, VoidCallback f) => InkWell(
+        borderRadius: BorderRadius.circular(18),
+        onTap: f,
+        child: Ink(
+          padding: const EdgeInsets.all(18),
+          decoration: BoxDecoration(gradient: gradient, borderRadius: BorderRadius.circular(18)),
+          child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+            Icon(i, color: Colors.white),
+            const SizedBox(width: 10),
+            Flexible(child: Text(t, overflow: TextOverflow.ellipsis,
+                style: const TextStyle(fontWeight: FontWeight.w800, color: Colors.white))),
+          ]),
+        ),
+      );
+
+  Widget _tool(IconData i, String t, String s, VoidCallback f) => Card(
+      child: ListTile(leading: Icon(i, color: acc2), title: Text(t), subtitle: Text(s, style: const TextStyle(color: muted)),
           trailing: const Icon(Icons.chevron_right), onTap: f));
 
   Widget _note(String t) => Card(
-      color: const Color(0xFF232736),
+      color: surface2,
       child: Padding(padding: const EdgeInsets.all(14), child: Text(t, style: const TextStyle(color: muted, fontSize: 13))));
 
   Widget _logCard() => Card(
         child: Padding(
           padding: const EdgeInsets.all(14),
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            const Text('Activity', style: TextStyle(fontWeight: FontWeight.bold)),
+            const Text('ACTIVITY', style: TextStyle(fontWeight: FontWeight.w800, color: muted, fontSize: 11, letterSpacing: 1.2)),
             const SizedBox(height: 6),
-            if (logs.isEmpty) const Text('Tap a game to boost & launch. Long-press / ☆ to add or remove games.', style: TextStyle(color: muted, fontSize: 12)),
-            ...logs.take(12).map((l) => Text(l, style: const TextStyle(color: muted, fontSize: 12, fontFamily: 'monospace'))),
+            if (logs.isEmpty)
+              const Text('Tap a game to boost & launch. Long-press / ☆ to add or remove games.',
+                  style: TextStyle(color: muted, fontSize: 12)),
+            ...logs.take(12).map((l) => Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 1),
+                  child: Text(l, style: const TextStyle(color: Color(0xFFB7BDD1), fontSize: 12)),
+                )),
           ]),
         ),
       );
 }
 
+class _OrbPainter extends CustomPainter {
+  final double used, pulse;
+  _OrbPainter(this.used, this.pulse);
+  @override
+  void paint(Canvas c, Size s) {
+    final ctr = s.center(Offset.zero), r = s.width / 2;
+    c.drawCircle(ctr, r - 4 + pulse * 4,
+        Paint()..color = acc.withValues(alpha: .18 + pulse * .12)..maskFilter = const MaskFilter.blur(BlurStyle.normal, 22));
+    c.drawCircle(ctr, r - 26, Paint()..shader = gradient.createShader(Rect.fromCircle(center: ctr, radius: r - 26)));
+    final ring = Paint()..style = PaintingStyle.stroke..strokeWidth = 10..strokeCap = StrokeCap.round;
+    c.drawCircle(ctr, r - 10, ring..color = surface2);
+    final col = used > .85 ? bad : used > .7 ? warn : good;
+    c.drawArc(Rect.fromCircle(center: ctr, radius: r - 10), -math.pi / 2, 2 * math.pi * used.clamp(0, 1), false,
+        ring..color = col);
+  }
+
+  @override
+  bool shouldRepaint(covariant _OrbPainter o) => o.used != used || o.pulse != pulse;
+}
+
 const androidTips = [
   'Turn OFF Battery Saver while gaming - it caps CPU/GPU.',
-  'Use your phone\'s built-in Game Mode / Game Space / Game Turbo (Samsung Game Booster, Xiaomi Game Turbo, Oppo Game Space) - it has system powers no app has.',
+  'Use your phone\'s built-in Game Mode / Game Space / Game Turbo - it has system powers no app has.',
   'Don\'t game while fast-charging - heat = throttling = FPS drops.',
   'Remove thick case during long sessions; avoid direct sun.',
   'Keep 10-15% storage free; clear game cache from inside the game only.',
   'Wi-Fi 5 GHz, sit near router; ask family to pause YouTube/downloads.',
   'Pick the closest server (Middle East / Asia for Pakistan).',
-  'Set in-game FPS to what your phone can hold steady - stable 60 beats unstable 90.',
+  'Stable 60 FPS beats unstable 90 - pick what your phone can hold.',
   'Restart phone once a day before long gaming sessions.',
 ];
 
 const iosTips = [
   'Turn OFF Low Power Mode (Settings › Battery) - it caps performance.',
   'Enable Focus › Gaming / Do Not Disturb to block notifications.',
-  'Settings › Accessibility › Motion › Reduce Motion ON for snappier UI.',
+  'Use Control Center rotation lock to stop accidental flips.',
   'Turn off Background App Refresh for apps you don\'t need.',
   'Keep 10-15% storage free (Settings › General › iPhone Storage).',
   'Don\'t game while charging - heat causes throttling.',
   'Wi-Fi 5 GHz near the router; pick closest server region.',
   'Check Battery Health - below ~80% the iPhone may throttle performance.',
-  'Restart iPhone before long sessions.',
 ];
 
 // ================================================================ NETWORK (both platforms)
@@ -426,22 +751,19 @@ class _NetworkPageState extends State<NetworkPage> {
     super.dispose();
   }
 
-  Future<double?> tcpPing(String host) => measureTcpPing(host);
-
-
   Future<void> testAll() async {
     setState(() { running = true; results.clear(); });
     for (final e in pingTargets.entries) {
-      try { await InternetAddress.lookup(e.value); } catch (_) {} // warm DNS
+      try { await InternetAddress.lookup(e.value); } catch (_) {}
       final samples = <double?>[];
       for (int i = 0; i < 5; i++) {
-        samples.add(await tcpPing(e.value));
+        samples.add(await measureTcpPing(e.value));
         await Future.delayed(const Duration(milliseconds: 150));
       }
       if (!mounted) return;
       setState(() => results[e.key] = pingStats(samples));
     }
-    setState(() => running = false);
+    if (mounted) setState(() => running = false);
   }
 
   void toggleLive(String region) {
@@ -449,7 +771,7 @@ class _NetworkPageState extends State<NetworkPage> {
     if (liveHost == region) { setState(() => liveHost = null); return; }
     setState(() { liveHost = region; live = []; });
     liveTimer = Timer.periodic(const Duration(seconds: 1), (_) async {
-      final p = await tcpPing(pingTargets[region]!);
+      final p = await measureTcpPing(pingTargets[region]!);
       if (mounted) setState(() { live.add(p ?? 999); if (live.length > 40) live.removeAt(0); });
     });
   }
@@ -457,54 +779,83 @@ class _NetworkPageState extends State<NetworkPage> {
   Color q(double ms) => ms < 60 ? good : ms < 100 ? warn : bad;
 
   @override
-  Widget build(BuildContext context) => ListView(padding: const EdgeInsets.all(12), children: [
-        FilledButton.icon(
-          style: FilledButton.styleFrom(backgroundColor: acc, padding: const EdgeInsets.all(16)),
-          onPressed: running ? null : testAll,
-          icon: const Icon(Icons.network_ping),
-          label: Text(running ? 'Testing…' : 'Test ping to game regions'),
+  Widget build(BuildContext context) {
+    final best = results.entries.where((e) => e.value != null).fold<MapEntry<String, List<double>?>?>(
+        null, (a, e) => a == null || e.value![0] < a.value![0] ? e : a);
+    return ListView(padding: const EdgeInsets.fromLTRB(18, 12, 18, 18), children: [
+      const Text('Network', style: TextStyle(fontSize: 26, fontWeight: FontWeight.w900)),
+      const Text('Ping, jitter & packet loss to game regions', style: TextStyle(color: muted)),
+      const SizedBox(height: 14),
+      InkWell(
+        borderRadius: BorderRadius.circular(18),
+        onTap: running ? null : testAll,
+        child: Ink(
+          padding: const EdgeInsets.all(18),
+          decoration: BoxDecoration(gradient: gradient, borderRadius: BorderRadius.circular(18)),
+          child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+            running
+                ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                : const Icon(Icons.network_ping, color: Colors.white),
+            const SizedBox(width: 10),
+            Flexible(
+              child: Text(running ? 'Testing…' : 'Test ping to game regions', overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontWeight: FontWeight.w800, color: Colors.white)),
+            ),
+          ]),
         ),
-        const SizedBox(height: 8),
-        ...results.entries.map((e) {
-          final r = e.value;
-          return Card(
-            child: ListTile(
-              title: Text(e.key),
-              subtitle: Text(r == null ? 'Unreachable' : 'Jitter ${r[1].toStringAsFixed(1)} ms • Loss ${r[2].toStringAsFixed(0)}%',
-                  style: const TextStyle(color: muted)),
-              trailing: Text(r == null ? '—' : '${r[0].toStringAsFixed(0)} ms',
-                  style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: r == null ? bad : q(r[0]))),
-              onTap: () => toggleLive(e.key),
-            ),
-          );
-        }),
-        if (results.isNotEmpty) const Text('  Tap a region for a live ping graph', style: TextStyle(color: muted, fontSize: 12)),
-        if (liveHost != null)
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(14),
-              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                Text('Live: $liveHost  ${live.isEmpty ? '' : '${live.last.toStringAsFixed(0)} ms'}',
-                    style: const TextStyle(fontWeight: FontWeight.bold)),
-                const SizedBox(height: 10),
-                SizedBox(height: 90, child: CustomPaint(painter: _Graph(live), size: Size.infinite)),
-                const Text('Spikes = Wi-Fi interference or someone downloading on your network.',
-                    style: TextStyle(color: muted, fontSize: 12)),
-              ]),
-            ),
+      ),
+      if (best != null)
+        Card(
+          color: good.withValues(alpha: .12),
+          child: ListTile(
+            leading: const Icon(Icons.emoji_events, color: good),
+            title: Text('Best region: ${best.key}'),
+            subtitle: Text('${best.value![0].toStringAsFixed(0)} ms — choose this server in your game',
+                style: const TextStyle(color: muted)),
           ),
-        const Card(
-          color: Color(0xFF232736),
+        ),
+      const SizedBox(height: 6),
+      ...results.entries.map((e) {
+        final r = e.value;
+        return Card(
+          child: ListTile(
+            title: Text(e.key),
+            subtitle: Text(r == null ? 'Unreachable' : 'Jitter ${r[1].toStringAsFixed(1)} ms • Loss ${r[2].toStringAsFixed(0)}%',
+                style: const TextStyle(color: muted)),
+            trailing: Text(r == null ? '—' : '${r[0].toStringAsFixed(0)} ms',
+                style: TextStyle(fontSize: 20, fontWeight: FontWeight.w900, color: r == null ? bad : q(r[0]))),
+            onTap: () => toggleLive(e.key),
+          ),
+        );
+      }),
+      if (results.isNotEmpty) const Text('  Tap a region for a live ping graph', style: TextStyle(color: muted, fontSize: 12)),
+      if (liveHost != null)
+        Card(
           child: Padding(
-            padding: EdgeInsets.all(14),
-            child: Text(
-                'Honest note: no app can shorten the distance to the game server. What really lowers ping: '
-                '5 GHz Wi-Fi close to the router, pausing downloads/streams on other devices, choosing the nearest '
-                'server (Bahrain/UAE/Mumbai for Pakistan), and trying a different network if your ISP route is bad.',
-                style: TextStyle(color: muted, fontSize: 13)),
+            padding: const EdgeInsets.all(14),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text('Live: $liveHost  ${live.isEmpty ? '' : '${live.last.toStringAsFixed(0)} ms'}',
+                  style: const TextStyle(fontWeight: FontWeight.bold)),
+              const SizedBox(height: 10),
+              SizedBox(height: 90, child: CustomPaint(painter: _Graph(live), size: Size.infinite)),
+              const Text('Spikes = Wi-Fi interference or someone downloading on your network.',
+                  style: TextStyle(color: muted, fontSize: 12)),
+            ]),
           ),
         ),
-      ]);
+      const Card(
+        color: surface2,
+        child: Padding(
+          padding: EdgeInsets.all(14),
+          child: Text(
+              'Honest note: no app can shorten the distance to the game server. What really lowers ping: '
+              '5 GHz Wi-Fi close to the router, pausing downloads/streams on other devices, choosing the nearest '
+              'server (Bahrain/UAE/Mumbai for Pakistan), and trying a different network if your ISP route is bad.',
+              style: TextStyle(color: muted, fontSize: 13)),
+        ),
+      ),
+    ]);
+  }
 }
 
 /// TCP connect time in ms to host:443 (works without root/admin on Android & iOS).
@@ -543,7 +894,7 @@ class _Graph extends CustomPainter {
       final x = s.width * i / 39, y = s.height - (d[i].clamp(0, mx) / mx) * s.height;
       i == 0 ? p.moveTo(x, y) : p.lineTo(x, y);
     }
-    c.drawPath(p, Paint()..color = acc..strokeWidth = 2.5..style = PaintingStyle.stroke);
+    c.drawPath(p, Paint()..shader = gradient.createShader(Offset.zero & s)..strokeWidth = 2.5..style = PaintingStyle.stroke);
   }
 
   @override

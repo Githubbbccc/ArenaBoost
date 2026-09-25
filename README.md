@@ -6,6 +6,7 @@
 |---|---|---|
 | [`windows/`](windows) | Windows 10/11 | Python + Tkinter (builds to `.exe`) |
 | [`mobile/`](mobile) | Android + iOS | Flutter + Kotlin |
+| `data/` + `ui/` + `src/` (repo root) | Android | Kotlin + Compose (AiCaption caption editor) |
 
 ## Download ready-made builds
 Open the **Actions** tab, choose the latest green run, and download from **Artifacts**:
@@ -38,12 +39,37 @@ Every push runs these on GitHub:
 | Mobile widget tests (20) | Linux | every screen, the boost flow, orientation, warnings, error handling |
 | **Android real-device test (11)** | **Android 14 emulator** | real app list, RAM, battery, temperature, cleaning, Do Not Disturb, rotation lock, app launch, and the real UI |
 | iOS compile check | macOS | the build compiles |
+| **AiCaption debug build + unit tests (5)** | Linux | Room/Hilt wiring compiles, the "which caption is on screen now" timestamp rule and time formatting |
 
 Run locally:
 ```
 cd windows && pip install psutil pytest && python -m pytest -v
 ArenaBoost.exe --selftest          # on any PC; the report goes to %APPDATA%\ArenaBoost\selftest.txt
 cd mobile && flutter test && flutter test integration_test   # the second one needs a phone connected
+```
+
+## AiCaption – video caption editor (Android, Kotlin + Compose)
+
+The repository root is also a standalone Gradle project (package `com.aicaption`), built in
+phases. Phase 3 adds the caption data layer and the interactive editor:
+
+| Path | What it is |
+|---|---|
+| `data/local/CaptionEntity.kt`, `CaptionDao.kt`, `AppDatabase.kt` | Room database for captions + reactive `Flow` DAO, provided by Hilt (`DatabaseModule`) |
+| `ui/screens/editor/EditorViewModel.kt` | ExoPlayer state, 50 ms playhead polling, the `activeCaption` timestamp rule, caption text/timing updates |
+| `ui/screens/editor/EditorScreen.kt` | video + caption overlay, play/pause + timeline scrubber, editable caption list |
+| `ui/components/` | `CaptionOverlay`, `CaptionListItem`, `VideoPlayerView`, `TimelineScrubber` |
+| `src/main/java/com/aicaption/` | `@HiltAndroidApp` application, `MainActivity` (share/open a video straight into the editor) |
+
+How it fits together: `CaptionDao` emits captions reactively, so an edit written to Room flows
+straight back into the list **and** the overlay; the overlay text comes from `activeCaption`,
+which is recomputed from the ExoPlayer playhead every 50 ms.
+
+Build and test (needs JDK 17 + Android SDK 35 + Gradle 8.9; no `gradle-wrapper.jar` is
+committed, so run `gradle wrapper` once if you want `./gradlew`):
+```
+gradle assembleDebug
+gradle testDebugUnitTest
 ```
 
 ## Honest note

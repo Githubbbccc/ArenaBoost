@@ -633,7 +633,6 @@ class _HomeState extends State<Home> with WidgetsBindingObserver, SingleTickerPr
               subtitle: const Text('Floating bar over your game: CPU · RAM · temp · time.\nTap it to come back - everything restores.',
                   style: TextStyle(color: muted, fontSize: 12)),
               value: gameBar == 'on',
-              activeColor: acc,
               onChanged: (v) => setGameBarPref(v ? 'on' : 'off'),
             ),
           ),

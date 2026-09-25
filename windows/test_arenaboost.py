@@ -119,6 +119,21 @@ def test_suspend_skips_game_and_protected():
         cleanup(p, exe)
 
 
+def test_never_suspends_same_pid_twice():
+    """Windows counts suspends; double-suspend would leave apps frozen after gaming."""
+    p, exe = spawn_sleeper(name="abhogtest3")
+    try:
+        time.sleep(0.5)
+        first = ab.WinTweaks.suspend_hogs([os.path.basename(exe)], set())
+        assert p.pid in first
+        assert ab.WinTweaks.suspend_hogs([os.path.basename(exe)], set(), already=first) == []
+        ab.WinTweaks.resume_pids(first)
+        time.sleep(0.3)
+        assert psutil.Process(p.pid).status() != psutil.STATUS_STOPPED
+    finally:
+        cleanup(p, exe)
+
+
 def test_find_game_by_folder_and_by_name(tmp_path):
     gdir = tmp_path / "MyGame"; gdir.mkdir()
     p, exe = spawn_sleeper(str(gdir), "mygame")

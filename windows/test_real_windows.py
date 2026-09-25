@@ -58,6 +58,32 @@ def test_real_standby_purge():
     assert r.startswith("OK"), r
 
 
+def test_real_ping_regions_reachable():
+    """Print real ping to every game region from this machine."""
+    ok = 0
+    for region, host in ab.PING_TARGETS.items():
+        r = ab.tcp_ping(host, count=3)
+        print(f"REAL ping {region:15s} {host}: {'unreachable' if not r else f'{r[0]:.0f} ms'}")
+        ok += bool(r)
+    assert ok >= len(ab.PING_TARGETS) // 2
+
+
+def test_real_double_suspend_is_fully_resumed(tmp_path):
+    """Real Windows suspend counting: after a long game session the hog must run again."""
+    hog = fake_exe(str(tmp_path / "h"), "abhog2")
+    p = subprocess.Popen([hog, "-c", "import time; time.sleep(60)"])
+    try:
+        time.sleep(1)
+        first = ab.WinTweaks.suspend_hogs(["abhog2.exe"], set())
+        for _ in range(5):  # simulate the 5-second re-check loop
+            ab.WinTweaks.suspend_hogs(["abhog2.exe"], set(), already=first)
+        ab.WinTweaks.resume_pids(first)
+        time.sleep(0.5)
+        assert psutil.Process(p.pid).status() != psutil.STATUS_STOPPED
+    finally:
+        p.kill()
+
+
 def test_real_timer_resolution():
     assert ab.WinTweaks.set_timer(True) is True
     assert ab.WinTweaks.set_timer(False) is True

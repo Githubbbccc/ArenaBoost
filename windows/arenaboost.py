@@ -250,13 +250,18 @@ class WinTweaks:
 
     # ---- process suspend / resume (NtSuspendProcess via psutil)
     @staticmethod
-    def suspend_hogs(hogs, game_pids):
+    def suspend_hogs(hogs, game_pids, already=()):
+        """Suspend matching processes. `already` = PIDs we suspended before.
+        IMPORTANT: Windows counts suspends (NtSuspendProcess). Suspending twice needs two
+        resumes, so we never suspend a PID twice."""
         hogs = {h.lower() for h in hogs}
+        already = set(already)
         done = []
         for p in psutil.process_iter(["pid", "name"]):
             try:
                 n = (p.info["name"] or "").lower()
-                if n in hogs and n not in PROTECTED and p.pid not in game_pids:
+                if (n in hogs and n not in PROTECTED and p.pid not in game_pids
+                        and p.pid not in already and p.pid != os.getpid()):
                     p.suspend()
                     done.append(p.pid)
             except (psutil.NoSuchProcess, psutil.AccessDenied):
@@ -267,7 +272,12 @@ class WinTweaks:
     def resume_pids(pids):
         for pid in pids:
             try:
-                psutil.Process(pid).resume()
+                p = psutil.Process(pid)
+                p.resume()
+                for _ in range(8):  # safety net: fully resume even if suspended multiple times
+                    if p.status() != psutil.STATUS_STOPPED:
+                        break
+                    p.resume()
             except Exception:
                 pass
 
@@ -976,8 +986,8 @@ class App(tk.Tk):
                     break
                 if self.cfg["opt"]["suspend"]:
                     pids = {p.pid for p in alive}
-                    extra = WinTweaks.suspend_hogs(self.cfg["hogs"], pids)
-                    extra = [x for x in extra if x not in self.engine.state.get("suspended", [])]
+                    extra = WinTweaks.suspend_hogs(self.cfg["hogs"], pids,
+                                                   already=self.engine.state.get("suspended", []))
                     if extra:
                         self.engine.state.setdefault("suspended", []).extend(extra)
                         self.engine._save_state()
@@ -1234,8 +1244,13 @@ def selftest():
         check("Timer resolution 0.5ms", lambda: ((WinTweaks.set_timer(True), WinTweaks.set_timer(False))[0], "set & released"))
         if admin:
             check("Standby RAM purge", lambda: ((r := WinTweaks.purge_standby()).startswith("OK"), r))
-    check("Ping (network)", lambda: ((r := tcp_ping("dynamodb.me-south-1.amazonaws.com", count=3)) is not None,
-                                     f"{r[0]:.0f} ms" if r else "unreachable"))
+    def ping():
+        for host in ["1.1.1.1", "dns.google", "www.microsoft.com"]:
+            r = tcp_ping(host, count=3)
+            if r:
+                return True, f"{host}: {r[0]:.0f} ms"
+        return False, "no internet connection"
+    check("Ping (network)", ping)
     fails = [r for r in results if not r[1]]
     out(f"\n{len(results) - len(fails)}/{len(results)} checks passed")
     report.close()

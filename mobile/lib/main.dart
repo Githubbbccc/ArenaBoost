@@ -11,7 +11,7 @@ import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 
-const appName = 'ArenaBoost', appVersion = '2.0.0', author = 'Ghost';
+const appName = 'ArenaBoost', appVersion = '2.2.0', author = 'Ghost';
 
 // ---------------------------------------------------------------- design tokens
 const bg = Color(0xFF0B0D14), surface = Color(0xFF161A26), surface2 = Color(0xFF1E2333);
@@ -101,7 +101,10 @@ class _HomeState extends State<Home> with WidgetsBindingObserver, SingleTickerPr
   List<GameApp> apps = [];
   Set<String> myGames = {};
   bool loading = true, showAll = false, boosting = false, boostedSession = false;
-  String query = '', appOrientation = 'portrait', gameRotation = 'off';
+  bool gameBarActive = false;
+  String activeGame = '';
+  DateTime? boostStarted;
+  String query = '', appOrientation = 'portrait', gameRotation = 'off', gameBar = 'on';
   Map mem = {}, dev = {};
   final logs = <String>[];
   Timer? timer;
@@ -130,8 +133,15 @@ class _HomeState extends State<Home> with WidgetsBindingObserver, SingleTickerPr
     if (s == AppLifecycleState.resumed && boostedSession) {
       boostedSession = false;
       if (isAndroid) {
-        native.invokeMethod('setDnd', {'on': false});
-        if (gameRotation != 'off') native.invokeMethod('lockRotation', {'mode': 'off'});
+        // Fire-and-forget, but never let a channel error go unhandled here.
+        if (gameBarActive) {
+          gameBarActive = false;
+          native.invokeMethod('setGameBar', {'on': false}).catchError((e) => log('⚠ Game bar hide: $e'));
+        }
+        native.invokeMethod('setDnd', {'on': false}).catchError((e) => log('⚠ DND restore: $e'));
+        if (gameRotation != 'off') {
+          native.invokeMethod('lockRotation', {'mode': 'off'}).catchError((e) => log('⚠ Rotation restore: $e'));
+        }
       }
       log('✅ Welcome back - notifications & rotation restored');
       _refreshStats();
@@ -149,6 +159,7 @@ class _HomeState extends State<Home> with WidgetsBindingObserver, SingleTickerPr
     myGames = (sp.getStringList('myGames') ?? []).toSet();
     appOrientation = sp.getString('appOrientation') ?? 'portrait';
     gameRotation = sp.getString('gameRotation') ?? 'off';
+    gameBar = sp.getString('gameBar') ?? 'on';
     await _loadApps();
     await _refreshStats();
     timer = Timer.periodic(const Duration(seconds: 3), (_) => _refreshStats());
@@ -189,7 +200,22 @@ class _HomeState extends State<Home> with WidgetsBindingObserver, SingleTickerPr
       final m = await native.invokeMapMethod('memInfo');
       final d = await native.invokeMapMethod('deviceInfo');
       if (mounted) setState(() { mem = m ?? {}; dev = d ?? {}; });
+      if (gameBarActive) _pushGameBar();
     } catch (_) {}
+  }
+
+  /// Live stats for the floating game bar (runs on the 3 s timer while active).
+  void _pushGameBar() {
+    final total = (mem['total'] ?? 0) as num, avail = (mem['avail'] ?? 0) as num;
+    final ram = total > 0 ? (1 - avail / total) * 100 : 0.0;
+    final cpu = (dev['cpuUsage'] ?? 0) as num;
+    final temp = (dev['batteryTemp'] ?? 0) as num;
+    final el = boostStarted != null ? DateTime.now().difference(boostStarted!) : Duration.zero;
+    final mm = el.inMinutes.toString().padLeft(2, '0');
+    final ss = (el.inSeconds % 60).toString().padLeft(2, '0');
+    native.invokeMethod('gameBarUpdate',
+        {'text': '⚡ $activeGame · CPU ${cpu.toStringAsFixed(0)}% · RAM ${ram.toStringAsFixed(0)}% · ${temp.toStringAsFixed(0)}°C · $mm:$ss'})
+        .catchError((_) {});
   }
 
   Future<void> _toggleGame(GameApp a) async {
@@ -203,6 +229,12 @@ class _HomeState extends State<Home> with WidgetsBindingObserver, SingleTickerPr
     (await SharedPreferences.getInstance()).setString('appOrientation', m);
     await applyAppOrientation(m);
     log('📱 Launcher orientation: $m');
+  }
+
+  Future<void> setGameBarPref(String m) async {
+    setState(() => gameBar = m);
+    (await SharedPreferences.getInstance()).setString('gameBar', m);
+    log(m == 'on' ? '📺 Game bar: shown while gaming' : '📺 Game bar: off');
   }
 
   Future<void> setGameRotation(String m) async {
@@ -245,7 +277,11 @@ class _HomeState extends State<Home> with WidgetsBindingObserver, SingleTickerPr
   // ---------------- BOOST & LAUNCH
   Future<void> boostAndLaunch(GameApp g) async {
     if (!isAndroid) {
-      await launchUrl(Uri.parse('${g.id}://'), mode: LaunchMode.externalApplication);
+      try {
+        await launchUrl(Uri.parse('${g.id}://'), mode: LaunchMode.externalApplication);
+      } catch (e) {
+        log('❌ Could not open ${g.name} ($e) - is it still installed?');
+      }
       return;
     }
     setState(() => boosting = true);
@@ -264,6 +300,17 @@ class _HomeState extends State<Home> with WidgetsBindingObserver, SingleTickerPr
       if (gameRotation != 'off') {
         final ok = await native.invokeMethod<bool>('lockRotation', {'mode': gameRotation});
         log(ok == true ? '🔒 Screen rotation locked: $gameRotation' : '🔓 Rotation lock needs permission (Settings)');
+      }
+      if (gameBar == 'on') {
+        if (await native.invokeMethod<bool>('canDrawOverlays') != true) {
+          log('📺 Game bar needs "Display over other apps" permission - opened Settings');
+          await native.invokeMethod('requestDrawOverlays');
+        } else if (await native.invokeMethod<bool>('setGameBar', {'on': true, 'title': g.name}) == true) {
+          gameBarActive = true;
+          activeGame = g.name;
+          boostStarted = DateTime.now();
+          log('📺 Game bar on - tap it to come back & restore');
+        }
       }
       await Future.delayed(const Duration(milliseconds: 400));
       boostedSession = true;
@@ -580,9 +627,21 @@ class _HomeState extends State<Home> with WidgetsBindingObserver, SingleTickerPr
           ),
         ),
         if (isAndroid) ...[
+          Card(
+            child: SwitchListTile(
+              title: const Text('Show game bar during gaming'),
+              subtitle: const Text('Floating bar over your game: CPU · RAM · temp · time.\nTap it to come back - everything restores.',
+                  style: TextStyle(color: muted, fontSize: 12)),
+              value: gameBar == 'on',
+              activeColor: acc,
+              onChanged: (v) => setGameBarPref(v ? 'on' : 'off'),
+            ),
+          ),
           _section('PERMISSIONS & SYSTEM'),
           _tool(Icons.do_not_disturb_on, 'Allow Do Not Disturb control', 'Blocks notifications during matches',
               () => native.invokeMethod('requestDndAccess')),
+          _tool(Icons.smart_display, 'Allow game bar overlay', '"Display over other apps" permission',
+              () => native.invokeMethod('requestDrawOverlays')),
           _tool(Icons.screen_lock_rotation, 'Allow rotation lock', '"Modify system settings" permission',
               () => native.invokeMethod('requestWriteSettings')),
           _tool(Icons.battery_charging_full, 'Battery optimization', 'Set your games to "Unrestricted"',
@@ -621,6 +680,10 @@ class _HomeState extends State<Home> with WidgetsBindingObserver, SingleTickerPr
               const Text('© 2026 $author · MIT License', style: TextStyle(color: muted)),
               const SizedBox(height: 8),
               const Text('🛡 Anti-cheat safe: never modifies game files or memory — no ban risk.',
+                  style: TextStyle(color: muted, fontSize: 12)),
+              const SizedBox(height: 6),
+              const Text('🔒 Secure: no telemetry, no data ever leaves your phone, no cleartext traffic, '
+                  'app data excluded from cloud backups, each permission granted by you.',
                   style: TextStyle(color: muted, fontSize: 12)),
             ]),
           ),

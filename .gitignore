@@ -4,3 +4,9 @@ __pycache__/
 windows/build/
 windows/dist/
 *.spec
+
+# Runtime files (Windows: %APPDATA%\ArenaBoost; on other OSes these can land next to the app)
+arenaboost.log
+config.json
+restore_state.json
+selftest.txt

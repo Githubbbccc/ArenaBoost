@@ -6,6 +6,7 @@ PKG=com.arena.arenaboost
 ( for i in $(seq 1 240); do
     adb shell cmd notification allow_dnd $PKG >/dev/null 2>&1
     adb shell appops set $PKG WRITE_SETTINGS allow >/dev/null 2>&1
+    adb shell appops set $PKG SYSTEM_ALERT_WINDOW allow >/dev/null 2>&1
     sleep 1
   done ) &
 GRANTER=$!

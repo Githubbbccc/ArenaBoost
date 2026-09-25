@@ -1,4 +1,4 @@
-# ⚡ ArenaBoost for Windows 10/11 — v2.0.0
+# ⚡ ArenaBoost for Windows 10/11 — v2.2.0
 **Created by Ghost** · © 2026 Ghost · MIT License
 
 ## Quick start
@@ -10,6 +10,7 @@
 - **Dashboard:** a glowing Boost button, live CPU/RAM/disk/network rings, and tips.
 - **Games:** Steam, Epic, Riot and emulator games are found automatically. There's search, and double-click to **Boost & Launch**.
 - **Monitor:** live usage, the top processes, a RAM purge button and a stutter-cause check.
+- **Game bar:** while boosted, a small floating bar hovers over your game with live CPU/RAM/network and session time. Drag it, hit ⏹ Restore to undo everything, or Hide to tuck it away.
 - **Network:** ping, jitter and packet loss to UAE, Mumbai, Singapore, Europe and the US, plus bandwidth hogs and DNS flush.
 - **Settings:** turn each tweak on or off, and edit which apps get paused.
 - **About:** version and license.

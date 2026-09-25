@@ -13,8 +13,6 @@ Design rules (from our research):
 Run as Administrator for full features (app asks automatically).
 """
 import ctypes, json, os, re, socket, subprocess, sys, threading, time, glob, logging, queue
-import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
 
 try:
     import psutil
@@ -22,18 +20,70 @@ except ImportError:
     print("Please run: pip install psutil"); sys.exit(1)
 
 IS_WIN = os.name == "nt"
+
+# tkinter is only needed for the window itself. The boost engine, the unit
+# tests and 'ArenaBoost --selftest' all run fine without Tk (e.g. a headless
+# PC or a Linux machine without python3-tk), so make the import optional and
+# fail with a clear message only when the GUI is actually started.
+try:
+    import tkinter as tk
+    from tkinter import ttk, filedialog, messagebox
+    HAVE_TK = True
+except ImportError:
+    HAVE_TK = False
+    import types as _types
+
+    class _TkMissing:
+        """Stand-in for the Tk classes: lets the class definitions below import,
+        and raises a friendly error if the GUI is actually started without Tk."""
+
+        def __init__(self, *a, **k):
+            raise RuntimeError("Python's tkinter (Tk) is not installed, so ArenaBoost cannot "
+                               "show its window. On Windows use the python.org installer (it "
+                               "includes Tk) or the ready-made ArenaBoost.exe; on Linux: "
+                               "apt install python3-tk. 'ArenaBoost --selftest' still works "
+                               "without Tk.")
+
+    _tk = _types.ModuleType("tkinter")
+    for _n in ("Tk", "Canvas", "Frame", "Label", "Text", "Entry", "Toplevel",
+               "BooleanVar", "StringVar", "IntVar", "DoubleVar"):
+        setattr(_tk, _n, _TkMissing)
+    tk = _tk
+    ttk = filedialog = messagebox = _TkMissing
+CREATE_NO_WINDOW = 0x08000000  # defined early: used by _secure_file below
 APP_DIR = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "ArenaBoost")
 os.makedirs(APP_DIR, exist_ok=True)
 CFG_FILE = os.path.join(APP_DIR, "config.json")
 STATE_FILE = os.path.join(APP_DIR, "restore_state.json")
+
+
+def _secure_file(path):
+    """Keep our data files readable/writable by the current user only.
+    On Windows the app runs ELEVATED and its config's launch commands execute
+    as admin, so a file any other user account can write to is a local
+    privilege-escalation path. Best effort: never breaks the app."""
+    try:
+        if IS_WIN:
+            user = os.environ.get("USERNAME", "")
+            if user and os.path.exists(path):
+                subprocess.run(f'icacls "{path}" /inheritance:r /grant:r "{user}:(F)"',
+                               capture_output=True, shell=True,
+                               creationflags=CREATE_NO_WINDOW, timeout=15)
+        elif os.path.exists(path):
+            os.chmod(path, 0o600)
+    except Exception:
+        pass
+
+
 logging.basicConfig(filename=os.path.join(APP_DIR, "arenaboost.log"), level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("ab")
+log.info("ArenaBoost started")
+_secure_file(os.path.join(APP_DIR, "arenaboost.log"))
 
 # ---------------------------------------------------------------- constants
 HIGH_PERF = "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c"
 ULTIMATE = "e9a42b02-d5df-448d-aa00-03f14749eb61"
-CREATE_NO_WINDOW = 0x08000000
 
 # Processes we must NEVER touch
 PROTECTED = {n.lower() for n in [
@@ -42,6 +92,7 @@ PROTECTED = {n.lower() for n in [
     "audiodg.exe", "msmpeng.exe", "securityhealthservice.exe", "nissrv.exe", "spoolsv.exe",
     "ctfmon.exe", "sihost.exe", "taskhostw.exe", "runtimebroker.exe", "conhost.exe",
     "vgc.exe", "vgtray.exe", "easyanticheat.exe", "easyanticheat_eos.exe", "beservice.exe",
+    "acservice.exe", "anticheat.exe",
     "python.exe", "pythonw.exe", "arenaboost.exe", "nvcontainer.exe", "nvdisplay.container.exe",
     "amdrsserv.exe", "atiesrxx.exe", "atieclxx.exe", "steam.exe", "steamwebhelper.exe",
     "epicgameslauncher.exe", "riotclientservices.exe", "discord.exe"]}
@@ -106,21 +157,43 @@ def relaunch_as_admin():
 
 # ================================================================ CONFIG
 def load_cfg():
-    cfg = {"games": [], "hogs": DEFAULT_HOGS, "services": DEFAULT_SERVICES,
+    cfg = {"games": [], "hogs": list(DEFAULT_HOGS), "services": list(DEFAULT_SERVICES),
            "opt": {"power": True, "priority": True, "suspend": True, "services": True,
-                   "standby": True, "timer": True, "gamebar_warn": True}}
+                   "standby": True, "timer": True, "gamebar_warn": True, "gamebar": True}}
     if os.path.exists(CFG_FILE):
         try:
             with open(CFG_FILE, encoding="utf-8") as f:
-                cfg.update(json.load(f))
+                data = json.load(f)
+            if isinstance(data, dict):
+                for k, v in data.items():
+                    if k == "opt":
+                        # Merge, never replace: a partial "opt" (e.g. written by an
+                        # older version) must not drop keys -> a KeyError in the
+                        # boost thread would lock the Boost button forever.
+                        # A non-dict value is ignored and the defaults are kept.
+                        if isinstance(v, dict):
+                            cfg["opt"].update(v)
+                    elif k in ("hogs", "services"):
+                        # must stay a list of strings: the boost thread calls
+                        # h.lower() on each entry without any guard
+                        if isinstance(v, list):
+                            cfg[k] = [x for x in v if isinstance(x, str)]
+                    elif k == "games":
+                        if isinstance(v, list):
+                            cfg[k] = v
+                    else:
+                        cfg[k] = v
         except Exception as e:
             log.error("cfg load %s", e)
+    # drop game entries that can't be displayed or launched (hand-edited files)
+    cfg["games"] = [g for g in cfg["games"] if isinstance(g, dict) and g.get("name")]
     return cfg
 
 
 def save_cfg(cfg):
     with open(CFG_FILE, "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=2)
+    _secure_file(CFG_FILE)
 
 
 # ================================================================ GAME SCAN
@@ -404,6 +477,7 @@ class BoostEngine:
     def _save_state(self):
         with open(STATE_FILE, "w") as f:
             json.dump(self.state, f)
+        _secure_file(STATE_FILE)
 
     def apply(self):
         o = self.cfg["opt"]
@@ -459,11 +533,25 @@ class BoostEngine:
     def crash_recover(logfn):
         if os.path.exists(STATE_FILE):
             try:
-                st = json.load(open(STATE_FILE))
-                logfn("♻ Found tweaks from a previous session - restoring…")
+                with open(STATE_FILE) as f:
+                    st = json.load(f)
+            except Exception as e:
+                # Corrupt/unreadable state: nothing to restore. Remove it so it
+                # doesn't fail (and get retried) on every future launch.
+                log.error("recover: unreadable state file, removing: %s", e)
+                logfn("⚠ Found a corrupted boost state file and removed it.")
+                try:
+                    os.remove(STATE_FILE)
+                except OSError:
+                    pass
+                return
+            logfn("♻ Found tweaks from a previous session - restoring…")
+            try:
                 BoostEngine({}, logfn).restore(st)
             except Exception as e:
-                log.error("recover %s", e)
+                # State file is kept, so the next start retries the restore.
+                log.error("recover restore %s", e)
+                logfn(f"⚠ Restoring the previous session failed: {e}")
 
 
 def find_game_procs(game):
@@ -531,7 +619,7 @@ def top_network_users():
 # ================================================================ UI
 
 # ================================================================ UI (v2 sleek design)
-APP_NAME, APP_VERSION, AUTHOR = "ArenaBoost", "2.0.0", "Ghost"
+APP_NAME, APP_VERSION, AUTHOR = "ArenaBoost", "2.2.0", "Ghost"
 BG, SIDE, CARD, CARD2 = "#0b0d14", "#10131c", "#161a26", "#1e2333"
 ACC, ACC2, FG, MUTED = "#8b5cf6", "#22d3ee", "#eef0f7", "#8a90a6"
 GOOD, WARN, BAD = "#34d399", "#fbbf24", "#f87171"
@@ -603,6 +691,73 @@ class BoostButton(tk.Canvas):
         self.create_text(s / 2, s / 2 + 26, text=self.state_txt, fill="white", font=(FONT, 14, "bold"))
 
 
+def gamebar_text(game, cpu, ram, net_down, elapsed):
+    """One line for the floating game bar (pure -> unit-testable without Tk)."""
+    m, s = divmod(int(max(0, elapsed)), 60)
+    return (f"⚡ {game or 'Boosted'} · CPU {max(0, cpu):.0f}% · RAM {max(0, ram):.0f}% · "
+            f"↓{max(0.0, net_down):.0f} KB/s · {m:02d}:{s:02d}")
+
+
+class GameBar(tk.Toplevel):
+    """Floating topmost bar shown while boosted: live CPU/RAM/net + session time.
+    Drag it by the label. ⏹ Restore ends the session; Hide just hides the bar."""
+
+    def __init__(self, master):
+        super().__init__(master)
+        self.title("ArenaBoost Game Bar")
+        self.overrideredirect(True)          # frameless, floats over games
+        self.attributes("-topmost", True)
+        try:
+            self.attributes("-alpha", 0.94)
+        except tk.TclError:
+            pass
+        self.configure(bg=SIDE, highlightthickness=1, highlightbackground=ACC)
+        self.lbl = tk.Label(self, text="⚡ Boosted", bg=SIDE, fg=FG,
+                            font=(FONT, 11, "bold"), cursor="fleur")
+        self.lbl.pack(side="left", padx=14, pady=10)
+        self._b1 = tk.Label(self, text="⏹ Restore", bg=CARD2, fg=GOOD,
+                            font=(FONT, 10, "bold"), padx=12, pady=8, cursor="hand2")
+        self._b1.pack(side="left", padx=(0, 4), pady=8)
+        self._b2 = tk.Label(self, text="Hide", bg=CARD2, fg=MUTED,
+                            font=(FONT, 10, "bold"), padx=12, pady=8, cursor="hand2")
+        self._b2.pack(side="left", padx=(0, 10), pady=8)
+        self._b1.bind("<Button-1>", lambda e: self._restore())
+        self._b2.bind("<Button-1>", lambda e: self.hide())
+        self._drag = None
+        self.lbl.bind("<ButtonPress-1>", self._drag_start)
+        self.lbl.bind("<B1-Motion>", self._drag_move)
+        self.withdraw()                       # hidden until a boost starts
+
+    def _drag_start(self, e):
+        self._drag = (e.x, e.y)
+
+    def _drag_move(self, e):
+        if self._drag:
+            self.geometry(f"+{e.x_root - self._drag[0]}+{e.y_root - self._drag[1]}")
+
+    def _restore(self):
+        if getattr(self, "on_restore", None):
+            self.on_restore()
+
+    def place_default(self):
+        self.update_idletasks()
+        x = self.winfo_screenwidth() - self.winfo_reqwidth() - 24
+        y = self.winfo_screenheight() - self.winfo_reqheight() - 90
+        self.geometry(f"+{max(0, x)}+{max(0, y)}")
+
+    def show(self):
+        if not self.winfo_viewable():
+            self.deiconify()
+            self.place_default()
+        self.lift()
+
+    def hide(self):
+        self.withdraw()
+
+    def update_text(self, text):
+        self.lbl.config(text=text)
+
+
 class App(tk.Tk):
     PAGES = [("home", "🏠", "Dashboard"), ("games", "🎮", "Games"), ("monitor", "📊", "Monitor"),
              ("network", "🌐", "Network"), ("settings", "⚙", "Settings"), ("about", "ⓘ", "About")]
@@ -617,6 +772,7 @@ class App(tk.Tk):
         self._uiq = queue.Queue()  # background threads NEVER touch Tk directly
         self.engine = BoostEngine(self.cfg, self.log)
         self._busy = False
+        self.gamebar_name = ""
         self._style()
         self._build()
         BoostEngine.crash_recover(self.log)
@@ -729,6 +885,10 @@ class App(tk.Tk):
         self.logbox = tk.Text(lf, height=6, bg=CARD, fg="#b7bdd1", bd=0, font=("Consolas", 9), wrap="word",
                               highlightthickness=0)
         self.logbox.pack(fill="x", padx=12, pady=(2, 10))
+
+        # floating game bar (visible while boosted; the monitor tick drives it)
+        self.gamebar = GameBar(self)
+        self.gamebar.on_restore = self.restore_now
 
     def show(self, key):
         for k, f in self.pages.items():
@@ -910,14 +1070,25 @@ class App(tk.Tk):
 
         def w():
             self.set_status("● Boosting…", ACC)
-            self.engine.apply()
+            self.ui(lambda: setattr(self, "gamebar_name", ""))
+            try:
+                self.engine.apply()
+            except Exception as e:  # never die with tweaks half-applied or the button locked
+                log.exception("boost_only")
+                self.engine.restore()
+                self.log(f"❌ Boost failed: {e} – everything restored")
             self._busy = False
-            self.set_status("● BOOSTED", GOOD)
+            self.set_status("● BOOSTED" if self.engine.active else "● Idle",
+                            GOOD if self.engine.active else MUTED)
         threading.Thread(target=w, daemon=True).start()
 
     def restore_now(self):
         def w():
-            self.engine.restore()
+            try:
+                self.engine.restore()
+            except Exception as e:
+                log.exception("restore_now")
+                self.log(f"❌ Restore failed: {e}")
             self.set_status("● Idle", MUTED)
         threading.Thread(target=w, daemon=True).start()
 
@@ -935,6 +1106,7 @@ class App(tk.Tk):
         try:
             self.log(f"🚀 Boosting for {g['name']}…")
             self.set_status("● Boosting…", ACC)
+            self.ui(lambda n=g.get("name", ""): setattr(self, "gamebar_name", n))
             self.engine.apply()
             self.set_status("● BOOSTED", GOOD)
             launch = g["launch"]
@@ -1058,6 +1230,14 @@ class App(tk.Tk):
             dmb = (((d.read_bytes + d.write_bytes) - (self._last_disk.read_bytes + self._last_disk.write_bytes)) / 2**20
                    if d and self._last_disk else 0)
             self._last_net, self._last_disk = n, d
+            # floating game bar follows the boost state (any restore path hides it within 1 s)
+            if self.engine.active and self.cfg["opt"].get("gamebar", True):
+                self.gamebar.show()
+                self.gamebar.update_text(gamebar_text(
+                    self.gamebar_name, cpu, vm.percent, down,
+                    time.time() - self.engine.state.get("time", time.time())))
+            elif self.gamebar.winfo_viewable():
+                self.gamebar.hide()
             freq = psutil.cpu_freq()
             self._card("CPU", f"{cpu:.0f}%", f"{psutil.cpu_count()} threads" + (f" · {freq.current:.0f} MHz" if freq else ""), cpu)
             self._card("RAM", f"{vm.percent:.0f}%", f"{vm.used/2**30:.1f} / {vm.total/2**30:.1f} GB", vm.percent)
@@ -1158,6 +1338,7 @@ class App(tk.Tk):
                 ("services", "Pause Windows Update, Delivery Optimization, Search, SysMain, BITS (admin)"),
                 ("standby", "One-time standby RAM purge before launch (admin)"),
                 ("timer", "0.5 ms timer resolution while boosted"),
+                ("gamebar", "Floating game bar over the game (live CPU · RAM · net · time)"),
                 ("gamebar_warn", "Warn about overlays / recording that cause stutter")]
         for k, t in opts:
             v = tk.BooleanVar(value=self.cfg["opt"].get(k, True))
@@ -1196,12 +1377,18 @@ class App(tk.Tk):
         tk.Label(c, text=f"© 2026 {AUTHOR}. Released under the MIT License.", bg=CARD, fg=MUTED).pack(anchor="w", padx=20)
         tk.Label(c, text="🛡 Anti-cheat safe: never reads, writes or injects into game memory.\n"
                          "♻ Crash-safe: every tweak is saved and restored automatically.\n"
+                         "🔒 Security: config, state and log are owner-only (no other user\n"
+                         "   can read or tamper with them); system & anti-cheat processes are\n"
+                         "   never touched; no telemetry, no data ever leaves your PC.\n"
                          f"📁 Config & logs: {APP_DIR}",
                  bg=CARD, fg=MUTED, justify="left").pack(anchor="w", padx=20, pady=(12, 18))
 
     def on_close(self):
         if self.engine.active:
-            self.engine.restore()
+            try:
+                self.engine.restore()
+            except Exception as e:
+                log.error("on_close restore %s", e)  # state file stays -> next start retries
         self.destroy()
 
 
@@ -1259,6 +1446,11 @@ def selftest():
 def main():
     if "--selftest" in sys.argv:
         sys.exit(selftest())
+    if not HAVE_TK:
+        sys.exit("ArenaBoost needs Python with tkinter (Tk) to show its window.\n"
+                 "On Windows use the python.org installer (includes Tk) or ArenaBoost.exe;\n"
+                 "on Linux: apt install python3-tk.\n"
+                 "'python arenaboost.py --selftest' still works without Tk.")
     if IS_WIN and not is_admin() and "--no-admin" not in sys.argv:
         try:
             if relaunch_as_admin():

@@ -54,6 +54,62 @@ def test_corrupt_config_does_not_crash():
     assert "games" in ab.load_cfg()
 
 
+def test_partial_opt_from_older_config_keeps_defaults():
+    """A config whose "opt" lacks keys (older version / hand edit) must keep the
+    defaults: a KeyError in the boost thread would lock the Boost button forever."""
+    json.dump({"games": [], "opt": {"power": False}}, open(ab.CFG_FILE, "w"))
+    cfg = ab.load_cfg()
+    assert cfg["opt"]["power"] is False  # the user's choice is kept
+    for k in ["priority", "suspend", "services", "standby", "timer", "gamebar_warn"]:
+        assert k in cfg["opt"], f"missing default key {k}"
+    e, _ = make_engine()
+    e.apply()   # must not raise KeyError
+    e.restore()
+    json.dump({"opt": "garbage"}, open(ab.CFG_FILE, "w"))  # non-dict opt -> defaults kept
+    assert ab.load_cfg()["opt"]["power"] is True
+
+
+def test_hand_corrupted_config_still_starts_and_boosts():
+    """Any garbage in config.json (wrong types, junk entries) must not stop the
+    app from starting, crash the UI, or kill the boost thread."""
+    json.dump({"games": [{"name": "Good"}, "junk", 42], "hogs": ["chrome.exe", 7],
+               "services": "not-a-list", "opt": "garbage"}, open(ab.CFG_FILE, "w"))
+    cfg = ab.load_cfg()
+    assert [g["name"] for g in cfg["games"]] == ["Good"]
+    assert cfg["hogs"] == ["chrome.exe"]
+    assert cfg["services"] == ab.DEFAULT_SERVICES
+    assert cfg["opt"]["power"] is True
+    e, _ = make_engine()
+    e.apply()   # must not raise
+    e.restore()
+
+
+def test_corrupt_state_file_is_removed():
+    """An unreadable state file holds no recoverable info: it must be removed so
+    it doesn't fail again on every launch."""
+    open(ab.STATE_FILE, "w").write("{broken")
+    ab.BoostEngine.crash_recover(lambda m: None)
+    assert not os.path.exists(ab.STATE_FILE)
+
+
+def test_gamebar_text_format():
+    t = ab.gamebar_text("PUBG", 45, 62, 120, 754)
+    assert t == "⚡ PUBG · CPU 45% · RAM 62% · ↓120 KB/s · 12:34"
+    assert ab.gamebar_text("", 0, 0, -5, 0) == "⚡ Boosted · CPU 0% · RAM 0% · ↓0 KB/s · 00:00"
+    assert ab.gamebar_text("G", 10, 10, 10, 3600) == "⚡ G · CPU 10% · RAM 10% · ↓10 KB/s · 60:00"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="NTFS ACLs are checked in the real Windows tests")
+def test_data_files_are_owner_only():
+    """The app runs elevated on Windows; config/state/log must not be readable
+    (let alone writable) by other local users -> no local privilege escalation."""
+    ab.save_cfg(ab.load_cfg())
+    ab.BoostEngine(ab.load_cfg(), lambda m: None)._save_state()
+    for f in (ab.CFG_FILE, ab.STATE_FILE, os.path.join(os.path.dirname(ab.CFG_FILE), "arenaboost.log")):
+        if os.path.exists(f):
+            assert os.stat(f).st_mode & 0o077 == 0, f
+
+
 def test_protected_never_in_default_hogs():
     assert not set(h.lower() for h in ab.DEFAULT_HOGS) & ab.PROTECTED
     for must in ["csrss.exe", "lsass.exe", "dwm.exe", "vgc.exe", "easyanticheat.exe", "beservice.exe", "explorer.exe"]:

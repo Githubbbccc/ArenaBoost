@@ -11,15 +11,21 @@ import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.Canvas
+import android.graphics.PixelFormat
 import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.Drawable
+import android.graphics.drawable.GradientDrawable
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.Uri
 import android.os.BatteryManager
 import android.os.Build
+import android.os.Gravity
 import android.os.PowerManager
 import android.provider.Settings
+import android.view.WindowManager
+import android.widget.LinearLayout
+import android.widget.TextView
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -31,6 +37,11 @@ class MainActivity : FlutterActivity() {
     private var savedDndFilter: Int? = null
     private var savedAutoRotate: Int? = null
     private var savedUserRotation: Int? = null
+    private val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+    private var gameBarView: LinearLayout? = null
+    private var gameBarText: TextView? = null
+    private var lastCpuIdle = 0L
+    private var lastCpuTotal = 0L
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -43,7 +54,15 @@ class MainActivity : FlutterActivity() {
                     }.start()
                     "launch" -> result.success(launch(call.argument<String>("pkg")!!))
                     "memInfo" -> result.success(memInfo())
-                    "boost" -> result.success(boost(call.argument<List<String>>("keep") ?: emptyList()))
+                    "boost" -> {
+                        // off the main thread: it scans all apps + sleeps ~700 ms,
+                        // which would freeze the Flutter UI mid-"Boosting…"
+                        val keep = call.argument<List<String>>("keep") ?: emptyList()
+                        Thread {
+                            val r = boost(keep)
+                            runOnUiThread { result.success(r) }
+                        }.start()
+                    }
                     "deviceInfo" -> result.success(deviceInfo())
                     "hasDndAccess" -> result.success(nm().isNotificationPolicyAccessGranted)
                     "requestDndAccess" -> {
@@ -56,6 +75,16 @@ class MainActivity : FlutterActivity() {
                         result.success(true)
                     }
                     "lockRotation" -> result.success(lockRotation(call.argument<String>("mode") ?: "off"))
+                    "canDrawOverlays" -> result.success(canDrawOverlays())
+                    "requestDrawOverlays" -> {
+                        startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                            Uri.parse("package:$packageName")))
+                        result.success(true)
+                    }
+                    "setGameBar" -> result.success(if (call.argument<Boolean>("on") == true)
+                        gameBarOn(call.argument<String>("title") ?: "Boosted")
+                    else gameBarOff())
+                    "gameBarUpdate" -> result.success(gameBarSetText(call.argument<String>("text") ?: ""))
                     "gameMode" -> result.success(gameMode(call.argument<String>("pkg")!!))
                     "openAppSettings" -> {
                         startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
@@ -196,6 +225,98 @@ class MainActivity : FlutterActivity() {
         } catch (e: Exception) { false }
     }
 
+    // ---------- floating game bar (overlay over the game while boosting)
+    private fun canDrawOverlays(): Boolean =
+        Build.VERSION.SDK_INT >= 23 && Settings.canDrawOverlays(this)
+
+    private fun gameBarOn(title: String): Boolean {
+        if (!canDrawOverlays()) return false
+        if (gameBarView != null) { gameBarSetText("⚡ $title"); return true }
+        val tv = TextView(this).apply {
+            text = "⚡ $title"
+            setTextColor(0xFFEEF0F7.toInt())
+            textSize = 13f
+            setSingleLine(true)
+        }
+        val bar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            background = GradientDrawable().apply {
+                cornerRadius = 28f
+                setColor(0xE610131C.toInt())
+                setStroke(2, 0xFF8B5CF6.toInt())
+            }
+            setPadding(48, 30, 48, 30)
+            addView(tv)
+            setOnClickListener { // tap the bar -> back to ArenaBoost (auto-restores on return)
+                val i = packageManager.getLaunchIntentForPackage(packageName)
+                if (i != null) {
+                    i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_BRING_TO_FRONT)
+                    startActivity(i)
+                }
+            }
+        }
+        val type = if (Build.VERSION.SDK_INT >= 26)
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+        else @Suppress("DEPRECATION") WindowManager.LayoutParams.TYPE_PHONE
+        val p = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            type,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+            PixelFormat.TRANSLUCENT
+        )
+        p.gravity = Gravity.TOP or Gravity.START
+        p.x = 24
+        p.y = 120
+        try {
+            wm.addView(bar, p)
+        } catch (e: Exception) {
+            return false
+        }
+        gameBarView = bar
+        gameBarText = tv
+        return true
+    }
+
+    private fun gameBarOff(): Boolean {
+        val v = gameBarView ?: return true
+        try { wm.removeView(v) } catch (e: Exception) { /* already gone */ }
+        gameBarView = null
+        gameBarText = null
+        return true
+    }
+
+    private fun gameBarSetText(text: String): Boolean {
+        val t = gameBarText ?: return false
+        t.text = text
+        return true
+    }
+
+    /** CPU usage % since the previous call (deviceInfo is polled every ~3 s). */
+    private fun cpuUsage(): Int {
+        return try {
+            val line = File("/proc/stat").readText().lineSequence().first { it.startsWith("cpu ") }
+            val v = line.split(Regex("\\s+")).drop(1).map { it.toLong() }
+            val idle = v[3] + if (v.size > 4) v[4] else 0L
+            val total = v.sum()
+            val dTotal = total - lastCpuTotal
+            val dIdle = idle - lastCpuIdle
+            lastCpuTotal = total
+            lastCpuIdle = idle
+            if (dTotal <= 0) 0 else (100.0 * (dTotal - dIdle) / dTotal).toInt()
+        } catch (e: Exception) {
+            0
+        }
+    }
+
+    override fun onDestroy() {
+        gameBarOff()
+        super.onDestroy()
+    }
+
     // ---------- Android 12+ Game Mode API (read-only for 3rd-party apps)
     private fun gameMode(pkg: String): String {
         if (Build.VERSION.SDK_INT < 31) return "Not supported (Android 12+ needed)"
@@ -243,6 +364,7 @@ class MainActivity : FlutterActivity() {
             "model" to "${Build.MANUFACTURER} ${Build.MODEL}",
             "android" to "Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})",
             "cpu" to Build.HARDWARE, "cores" to Runtime.getRuntime().availableProcessors(),
+            "cpuUsage" to cpuUsage(),
             "batteryTemp" to temp, "battery" to level, "charging" to plugged,
             "thermal" to thermal, "powerSave" to pw.isPowerSaveMode, "network" to net,
             "refresh" to refresh.toInt(),

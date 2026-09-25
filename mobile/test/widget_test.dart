@@ -16,7 +16,7 @@ Map<String, dynamic> fakeDev({double temp = 35, bool powerSave = false, String n
       'storageFree': 20 * 1073741824, 'storageTotal': 128 * 1073741824,
     };
 var dev = fakeDev();
-bool dndGranted = true, canWrite = true;
+bool dndGranted = true, canWrite = true, canOverlays = true;
 
 void installFakes() {
   final m = TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
@@ -42,6 +42,12 @@ void installFakes() {
       case 'lockRotation':
         return canWrite;
       case 'launch':
+        return true;
+      case 'canDrawOverlays':
+        return canOverlays;
+      case 'setGameBar':
+        return canOverlays;
+      case 'gameBarUpdate':
         return true;
     }
     return true;
@@ -81,6 +87,7 @@ void main() {
     dev = fakeDev();
     dndGranted = true;
     canWrite = true;
+    canOverlays = true;
     SharedPreferences.setMockInitialValues({});
     isAndroidPlatform = () => true;
     installFakes();
@@ -268,6 +275,7 @@ void main() {
       await goTab(t, 'Settings');
       for (final e in {
         'Allow Do Not Disturb control': 'requestDndAccess',
+        'Allow game bar overlay': 'requestDrawOverlays',
         'Allow rotation lock': 'requestWriteSettings',
         'Battery optimization': 'openBatteryOpt',
         'Developer options': 'openDevOptions',
@@ -278,6 +286,49 @@ void main() {
         await t.pump();
         expect(names, [e.value]);
       }
+    });
+  });
+
+  group('Game bar', () {
+    testWidgets('shown over the game while boosting, hidden on return', (t) async {
+      await pumpApp(t);
+      calls.clear();
+      await boostGame(t, 'PUBG MOBILE');
+      final on = calls.firstWhere((c) => c.method == 'setGameBar');
+      expect(on.arguments['on'], true);
+      expect(on.arguments['title'], 'PUBG MOBILE');
+      expect(names.indexOf('setGameBar'), lessThan(names.indexOf('launch')));
+      // the 3 s stats timer pushes live overlay updates while the session is active
+      await t.pump(const Duration(seconds: 4));
+      expect(calls.where((c) => c.method == 'gameBarUpdate'), isNotEmpty);
+      calls.clear();
+      // user returns from the game -> bar hides, session restores
+      for (final st in [AppLifecycleState.inactive, AppLifecycleState.hidden, AppLifecycleState.paused,
+          AppLifecycleState.hidden, AppLifecycleState.inactive, AppLifecycleState.resumed]) {
+        t.binding.handleAppLifecycleStateChanged(st);
+      }
+      await t.pump();
+      expect(calls.where((c) => c.method == 'setGameBar').single.arguments['on'], false);
+    });
+
+    testWidgets('without overlay permission it asks once and keeps boosting', (t) async {
+      canOverlays = false;
+      await pumpApp(t);
+      calls.clear();
+      await boostGame(t, 'Free Fire');
+      expect(names, contains('requestDrawOverlays'));
+      expect(names, isNot(contains('setGameBar')));
+      expect(names, contains('launch'), reason: 'boost must continue even without the bar');
+      expect(find.textContaining('Game bar needs'), findsOneWidget);
+    });
+
+    testWidgets('setting toggle is saved', (t) async {
+      await pumpApp(t);
+      await goTab(t, 'Settings');
+      await t.ensureVisible(find.text('Show game bar during gaming'));
+      await t.tap(find.text('Show game bar during gaming'));
+      await t.pump();
+      expect((await SharedPreferences.getInstance()).getString('gameBar'), 'off');
     });
   });
 

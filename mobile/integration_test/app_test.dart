@@ -76,6 +76,18 @@ void main() {
       expect([l, p, off], everyElement(can));
     });
 
+    testWidgets('real game bar overlay (or graceful without permission)', (t) async {
+      final granted = await native.invokeMethod<bool>('canDrawOverlays');
+      final on = await native.invokeMethod<bool>('setGameBar', {'on': true, 'title': 'Test Game'});
+      final upd = await native.invokeMethod<bool>('gameBarUpdate',
+          {'text': '⚡ Test Game · CPU 10% · RAM 20% · 30°C · 00:01'});
+      final off = await native.invokeMethod<bool>('setGameBar', {'on': false});
+      debugPrint('REAL: overlay granted=$granted on=$on update=$upd off=$off');
+      expect(on, granted);
+      expect(off, granted);
+      expect(upd, on == true);
+    });
+
     testWidgets('Game Mode API query does not crash', (t) async {
       final g = await native.invokeMethod<String>('gameMode', {'pkg': 'com.arena.arenaboost'});
       debugPrint('REAL: game mode = $g');

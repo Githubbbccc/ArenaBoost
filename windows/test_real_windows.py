@@ -58,6 +58,13 @@ def test_real_standby_purge():
     assert r.startswith("OK"), r
 
 
+def test_real_data_files_are_owner_only():
+    """App runs elevated: config/state must not grant access to BUILTIN\\Users / Everyone."""
+    ab.save_cfg(ab.load_cfg())
+    out = subprocess.run(f'icacls "{ab.CFG_FILE}"', capture_output=True, text=True).stdout
+    assert "BUILTIN\\Users" not in out and "Everyone" not in out, out
+
+
 def test_real_ping_regions_reachable():
     """Print real ping to every game region from this machine."""
     ok = 0
@@ -106,6 +113,15 @@ def test_gui_opens_and_every_page_works():
             assert app.pages[key].winfo_ismapped()
         app.update_monitor()
         app.update()
+        # floating game bar: show, live text, hide
+        app.gamebar.show()
+        app.update()
+        assert app.gamebar.winfo_ismapped()
+        app.gamebar.update_text(ab.gamebar_text("SelfTest", 10, 20, 30, 65))
+        app.update()
+        app.gamebar.hide()
+        app.update()
+        assert not app.gamebar.winfo_ismapped()
         app.check_overlays()
         app.find_hogs()
         app.search.set("zzz")
@@ -150,10 +166,17 @@ def test_real_boost_and_launch_end_to_end(tmp_path):
         assert ab.WinTweaks.get_power_plan() != old_plan, "power plan not switched"
         assert psutil.Process(hog_p.pid).status() == psutil.STATUS_STOPPED, "hog not suspended"
         _wait(lambda: all(p.nice() == psutil.ABOVE_NORMAL_PRIORITY_CLASS for p in ab.find_game_procs(game)), 20)
+        # floating game bar is visible over the running game
+        app.update_monitor()
+        app.update()
+        assert app.gamebar.winfo_ismapped(), "game bar should be visible while the game runs"
         th.join(60)
         # after game closed: everything restored
         assert res.get("r") == "ok"
         assert not app.engine.active
+        app.update_monitor()
+        app.update()
+        assert not app.gamebar.winfo_ismapped(), "game bar should hide after restore"
         assert ab.WinTweaks.get_power_plan() == old_plan, "power plan not restored"
         assert psutil.Process(hog_p.pid).status() != psutil.STATUS_STOPPED, "hog not resumed"
         assert not os.path.exists(ab.STATE_FILE)

@@ -1,0 +1,12 @@
+name: probe
+on: workflow_dispatch
+jobs:
+  p:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          for h in dynamodb.me-south-1.amazonaws.com ec2.me-south-1.amazonaws.com s3.me-south-1.amazonaws.com sts.me-south-1.amazonaws.com lambda.me-south-1.amazonaws.com ec2.me-central-1.amazonaws.com dynamodb.me-central-1.amazonaws.com; do
+            ip=$(getent hosts $h | awk '{print $1}' | head -1)
+            t=$( { /usr/bin/time -f %e timeout 3 bash -c "</dev/tcp/$h/443"; } 2>&1 ) && r=OK || r=FAIL
+            echo "PROBE $h ip=$ip $r $t"
+          done
